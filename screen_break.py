@@ -51,11 +51,11 @@ def _ensure_deps():
             subprocess.check_call(
                 [sys.executable, "-m", "pip", "install", "--quiet"] + flags + missing,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            print("  ✓ Installed.\n")
+            print("  [OK] Installed.\n")
             return True
         except (subprocess.CalledProcessError, FileNotFoundError):
             continue
-    print(f"  ✗ Failed.  Run:  pip install {' '.join(missing)}\n")
+    print(f"  [X] Failed.  Run:  pip install {' '.join(missing)}\n")
     return False
 
 HAS_TRAY = _ensure_deps()
@@ -587,7 +587,7 @@ def load_config() -> dict[str, Any]:
             if isinstance(user_cfg, dict):
                 defaults.update(user_cfg)
         except (json.JSONDecodeError, IOError, OSError) as e:
-            print(f"  ⚠ Config load error: {e}. Using defaults.")
+            print(f"  [!] Config load error: {e}. Using defaults.")
 
     # Apply test mode overrides
     if TEST_MODE:
@@ -617,7 +617,7 @@ def save_config(cfg: dict[str, Any]) -> None:
         with open(CONFIG_FILE, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
     except (IOError, OSError) as e:
-        print(f"  ⚠ Config save error: {e}")
+        print(f"  [!] Config save error: {e}")
 
 # ─── Statistics ───────────────────────────────────────────────
 DEFAULT_STATS = {
@@ -882,7 +882,7 @@ def log_hydration(stats: dict) -> int:
 
 # ─── Test Mode Intervals ─────────────────────────────────────
 if TEST_MODE:
-    print("\n  ⚠  TEST MODE: Using short intervals")
+    print("\n  [!] TEST MODE: Using short intervals")
     print("      Eye rest: 1 min, Micro-pause: 2 min\n")
 
 
@@ -2055,7 +2055,7 @@ class ScreenBreakApp:
             with open(NOTES_FILE, "w", encoding="utf-8") as f:
                 json.dump(self.notes, f, indent=2)
         except (IOError, OSError) as e:
-            print(f"  ⚠ Notes save error: {e}")
+            print(f"  [!] Notes save error: {e}")
 
     def _load_notes(self) -> list[dict[str, str]]:
         if os.path.exists(NOTES_FILE):
@@ -3262,27 +3262,30 @@ class ScreenBreakApp:
             self.root.bind_all("<Control-Q>", lambda e: self._quit())
 
     def _print_schedule(self):
-        print()
-        print("  ┌───────────────────────────────────────────────┐")
-        print("  │          Screen Break — Schedule             │")
-        print("  ├───────────────────────────────────────────────┤")
-        for brk in self.config.get("breaks", []):
-            d = f"({brk['duration']} min)" if brk['duration'] > 0 else ""
-            t12 = self._fmt12(brk['time'])
-            print(f"  │  {t12:<8s}  {brk['title']:<22s} {d:>8s} │")
-        print("  ├───────────────────────────────────────────────┤")
-        ei, mi = int(self.eye_iv), int(self.micro_iv)
-        mg = self.config.get("minimum_break_gap", 20)
-        print(f"  │  Every {ei:>2d} min   20-20-20 eye rest            │")
-        print(f"  │  Every {mi:>2d} min   Micro-pause (5 min)          │")
-        print(f"  │  Minimum {mg} min between any breaks           │")
-        tz = datetime.datetime.now().astimezone().tzinfo
-        print(f"  │  Timezone: {str(tz):<34s} │")
-        print("  └───────────────────────────────────────────────┘")
-        if not HAS_TRAY:
-            print("\n  ⚠  No tray icon (pystray not available).")
-            print("     pip install pystray pillow")
-        print()
+        try:
+            print()
+            print("  +-----------------------------------------------+")
+            print("  |          Screen Break -- Schedule              |")
+            print("  +-----------------------------------------------+")
+            for brk in self.config.get("breaks", []):
+                d = f"({brk['duration']} min)" if brk['duration'] > 0 else ""
+                t12 = self._fmt12(brk['time'])
+                print(f"  |  {t12:<8s}  {brk['title']:<22s} {d:>8s} |")
+            print("  +-----------------------------------------------+")
+            ei, mi = int(self.eye_iv), int(self.micro_iv)
+            mg = self.config.get("minimum_break_gap", 20)
+            print(f"  |  Every {ei:>2d} min   20-20-20 eye rest            |")
+            print(f"  |  Every {mi:>2d} min   Micro-pause (5 min)          |")
+            print(f"  |  Minimum {mg} min between any breaks           |")
+            tz = datetime.datetime.now().astimezone().tzinfo
+            print(f"  |  Timezone: {str(tz):<34s} |")
+            print("  +-----------------------------------------------+")
+            if not HAS_TRAY:
+                print("\n  [!] No tray icon (pystray not available).")
+                print("      pip install pystray pillow")
+            print()
+        except (UnicodeEncodeError, OSError):
+            pass  # silently skip on consoles that can't print
 
     # ━━━ System Tray ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -3309,7 +3312,7 @@ class ScreenBreakApp:
         r_inner = r_outer - 5
 
         # Crown button
-        draw.rectangle([cx-4+1, 20+1, cx+4+1, 16+1], fill=(64,64,64,255))
+        draw.rectangle([cx-4+1, 14+1, cx+4+1, 20+1], fill=(64,64,64,255))
         draw.rectangle([cx-4, 14, cx+4, 20], fill=TEAL, outline=BLACK)
         draw.line([(cx-3, 15), (cx+3, 15)], fill=LIGHT_CYAN)
         draw.line([(cx-3, 15), (cx-3, 19)], fill=LIGHT_CYAN)
