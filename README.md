@@ -21,7 +21,7 @@ A healthy break reminder app that runs in your system tray. Reminds you to rest 
 - **Work Hours** — Only active during your configured work hours
 - **Notes** — Capture where you left off before taking a break
 
-### Premium Features (v2.0)
+### Premium Features (v2.0+)
 - **Presentation Mode** — Auto-pauses breaks during fullscreen apps (presentations, games, videos)
 - **Multi-Monitor Support** — Break overlays appear on all connected monitors
 - **Custom Sounds** — Use your own .wav, .mp3, or .ogg files for notifications
