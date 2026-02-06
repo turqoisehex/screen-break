@@ -63,8 +63,6 @@ HAS_TRAY = _ensure_deps()
 # ─── Imports ──────────────────────────────────────────────────
 import threading, datetime, json, math, random
 from typing import Any, Callable, Optional
-import random
-import math
 
 if HAS_TRAY:
     try:
@@ -117,42 +115,56 @@ STATS_FILE  = os.path.join(os.path.expanduser("~"), "screen_break_stats.json")
 IDLE_CHECK_INTERVAL = 5  # Check idle every 5 seconds
 DEFAULT_IDLE_THRESHOLD = 300  # 5 minutes of inactivity = idle
 
-def get_idle_seconds() -> float:
-    """Get seconds since last user input. Returns 0 if detection unavailable."""
+_idle_impl = None  # Cached platform-specific idle detection function
+
+def _init_idle_impl():
+    """Set up platform-specific idle detection (called once, cached)."""
+    global _idle_impl
+    if _idle_impl is not None:
+        return
     try:
         if IS_WIN:
             import ctypes
             from ctypes import Structure, c_uint, sizeof, byref, windll
             class LASTINPUTINFO(Structure):
                 _fields_ = [("cbSize", c_uint), ("dwTime", c_uint)]
-            lii = LASTINPUTINFO()
-            lii.cbSize = sizeof(LASTINPUTINFO)
-            if windll.user32.GetLastInputInfo(byref(lii)):
-                millis = windll.kernel32.GetTickCount() - lii.dwTime
-                return millis / 1000.0
+            def _win_idle():
+                lii = LASTINPUTINFO()
+                lii.cbSize = sizeof(LASTINPUTINFO)
+                if windll.user32.GetLastInputInfo(byref(lii)):
+                    return (windll.kernel32.GetTickCount() - lii.dwTime) / 1000.0
+                return 0.0
+            _idle_impl = _win_idle
         elif IS_MAC:
-            import subprocess
-            result = subprocess.run(
-                ["ioreg", "-c", "IOHIDSystem"],
-                capture_output=True, text=True, timeout=2
-            )
-            for line in result.stdout.split("\n"):
-                if "HIDIdleTime" in line:
-                    # Value is in nanoseconds
-                    ns = int(line.split("=")[-1].strip())
-                    return ns / 1_000_000_000
+            import ctypes, ctypes.util
+            cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics"))
+            fn = cg.CGEventSourceSecondsSinceLastEventType
+            fn.restype = ctypes.c_double
+            fn.argtypes = [ctypes.c_int32, ctypes.c_uint32]
+            # kCGEventSourceStateCombinedSessionState = 0, kCGAnyInputEventType = ~0
+            _idle_impl = lambda: fn(0, 0xFFFFFFFF)
         else:  # Linux
             import subprocess
-            result = subprocess.run(
-                ["xprintidle"],
-                capture_output=True, text=True, timeout=2
-            )
-            return int(result.stdout.strip()) / 1000.0
+            def _linux_idle():
+                result = subprocess.run(
+                    ["xprintidle"], capture_output=True, text=True, timeout=2)
+                return int(result.stdout.strip()) / 1000.0
+            _idle_impl = _linux_idle
     except Exception:
-        pass
-    return 0.0
+        _idle_impl = lambda: 0.0
+
+def get_idle_seconds() -> float:
+    """Get seconds since last user input. Returns 0 if detection unavailable."""
+    if _idle_impl is None:
+        _init_idle_impl()
+    try:
+        return _idle_impl()
+    except Exception:
+        return 0.0
 
 # ─── Sound System ─────────────────────────────────────────────
+_sound_counter = 0
+
 def play_sound(sound_type: str = "chime", custom_path: str = None) -> None:
     """Play a notification sound. Supports mp3, wav, and other common formats."""
     # Try custom sound first
@@ -162,8 +174,9 @@ def play_sound(sound_type: str = "chime", custom_path: str = None) -> None:
                 # Use Windows MCI (Media Control Interface) - plays mp3, wav, wma, etc. natively
                 import ctypes
                 winmm = ctypes.windll.winmm
-                # Unique alias for this playback
-                alias = f"sound_{id(custom_path)}"
+                global _sound_counter
+                _sound_counter += 1
+                alias = f"sound_{_sound_counter}"
                 # Open and play asynchronously
                 winmm.mciSendStringW(f'open "{custom_path}" alias {alias}', None, 0, None)
                 winmm.mciSendStringW(f'play {alias}', None, 0, None)
@@ -172,7 +185,7 @@ def play_sound(sound_type: str = "chime", custom_path: str = None) -> None:
                 def cleanup():
                     import time; time.sleep(30)
                     try: winmm.mciSendStringW(f'close {alias}', None, 0, None)
-                    except: pass
+                    except Exception: pass
                 threading.Thread(target=cleanup, daemon=True).start()
                 return
             elif IS_MAC:
@@ -553,9 +566,7 @@ DEFAULT_CONFIG = {
     "guided_eye_exercises": False,    # Animated eye exercise routines
     "breathing_exercises": False,     # Breathing animation during breaks
     "desk_exercises": False,          # Animated desk exercises
-    "focus_session_enabled": False,   # Pomodoro with task naming
     "focus_session_duration": 25,     # Focus session length in minutes
-    "day_schedules": {},              # Per-day schedule overrides
     "breaks": [
         {"time": "09:45", "duration": 15, "title": "Stretch Break"},
         {"time": "11:30", "duration": 30, "title": "Movement & Mindfulness"},
@@ -589,7 +600,7 @@ def load_config() -> dict[str, Any]:
     for key, min_val, default in [
         ("eye_rest_interval", 1, 20),
         ("micro_pause_interval", 1, 45),
-        ("minimum_break_gap", 0, 20),
+        ("minimum_break_gap", 1, 20),
         ("warning_seconds", 5, 60),
         ("snooze_minutes", 1, 5),
         ("eye_rest_duration", 5, 20),
@@ -741,9 +752,8 @@ class ToolTip:
         widget.bind("<Leave>", self._hide)
 
     def _show(self, event=None):
-        x, y, _, _ = self.widget.bbox("insert") if hasattr(self.widget, 'bbox') else (0, 0, 0, 0)
-        x += self.widget.winfo_rootx() + 25
-        y += self.widget.winfo_rooty() + 25
+        x = self.widget.winfo_rootx() + 25
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 5
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
         self.tip.wm_geometry(f"+{x}+{y}")
@@ -764,6 +774,7 @@ THEMES = {
         "btn_pri": "#1d4ed8", "btn_sec": "#334155",
         "text": "#f1f5f9", "text_dim": "#94a3b8", "text_mut": "#64748b",
         "eye_bg": "#0c1222", "eye_acc": "#22d3ee", "cd": "#fbbf24",
+        "w_bg": "#1a1a2e", "w_gl": "#0ea5e9",
         "ok": "#22c55e", "err": "#ef4444", "gentle": "#2dd4bf",
     },
     "light": {
@@ -772,6 +783,7 @@ THEMES = {
         "btn_pri": "#2563eb", "btn_sec": "#e2e8f0",
         "text": "#1e293b", "text_dim": "#475569", "text_mut": "#94a3b8",
         "eye_bg": "#e0f2fe", "eye_acc": "#0369a1", "cd": "#d97706",
+        "w_bg": "#e2e8f0", "w_gl": "#2563eb",
         "ok": "#16a34a", "err": "#dc2626", "gentle": "#0d9488",
     },
     "nord": {
@@ -780,6 +792,7 @@ THEMES = {
         "btn_pri": "#5e81ac", "btn_sec": "#4c566a",
         "text": "#eceff4", "text_dim": "#d8dee9", "text_mut": "#a3be8c",
         "eye_bg": "#242933", "eye_acc": "#8fbcbb", "cd": "#ebcb8b",
+        "w_bg": "#242933", "w_gl": "#88c0d0",
         "ok": "#a3be8c", "err": "#bf616a", "gentle": "#8fbcbb",
     },
 }
@@ -788,7 +801,7 @@ def apply_theme(theme_name: str) -> None:
     """Apply a theme by updating global color constants."""
     global C_BG, C_CARD, C_CARD_IN, C_ACCENT, C_ACCENT2
     global C_BTN_PRI, C_BTN_SEC, C_TEXT, C_TEXT_DIM, C_TEXT_MUT
-    global C_EYE_BG, C_EYE_ACC, C_CD, C_OK, C_ERR, C_GENTLE
+    global C_EYE_BG, C_EYE_ACC, C_CD, C_W_BG, C_W_GL, C_OK, C_ERR, C_GENTLE
 
     theme = THEMES.get(theme_name, THEMES["dark"])
     C_BG = theme["bg"];       C_CARD = theme["card"];       C_CARD_IN = theme["card_in"]
@@ -796,6 +809,7 @@ def apply_theme(theme_name: str) -> None:
     C_BTN_PRI = theme["btn_pri"]; C_BTN_SEC = theme["btn_sec"]
     C_TEXT = theme["text"];   C_TEXT_DIM = theme["text_dim"]; C_TEXT_MUT = theme["text_mut"]
     C_EYE_BG = theme["eye_bg"]; C_EYE_ACC = theme["eye_acc"]; C_CD = theme["cd"]
+    C_W_BG = theme["w_bg"];   C_W_GL = theme["w_gl"]
     C_OK = theme["ok"];       C_ERR = theme["err"];         C_GENTLE = theme["gentle"]
 
 # ─── Fullscreen Detection ────────────────────────────────────
@@ -866,56 +880,6 @@ def log_hydration(stats: dict) -> int:
     hydration["glasses"] = hydration.get("glasses", 0) + 1
     return hydration["glasses"]
 
-# ─── Custom Messages ─────────────────────────────────────────
-def get_break_message(config: dict, break_type: str = "generic") -> str:
-    """Get a break message - custom if available, otherwise default."""
-    if config.get("use_custom_messages", False):
-        custom = config.get("custom_messages", [])
-        if custom:
-            return random.choice(custom)
-
-    defaults = {
-        "eye": "Your eyes deserve a rest. Look at something far away.",
-        "micro": "Time to move! A quick stretch makes a big difference.",
-        "scheduled": "You've earned this break. Step away and recharge.",
-        "generic": "Taking breaks makes you more productive, not less.",
-    }
-    return defaults.get(break_type, defaults["generic"])
-
-# ─── Breathing Exercise Data ─────────────────────────────────
-BREATHING_PATTERNS = {
-    "box": {"name": "Box Breathing", "inhale": 4, "hold1": 4, "exhale": 4, "hold2": 4},
-    "relaxing": {"name": "Relaxing Breath", "inhale": 4, "hold1": 7, "exhale": 8, "hold2": 0},
-    "energizing": {"name": "Energizing Breath", "inhale": 6, "hold1": 0, "exhale": 2, "hold2": 0},
-}
-
-# ─── Eye Exercise Data ───────────────────────────────────────
-EYE_EXERCISES = [
-    {"name": "Circle Trace", "duration": 20, "type": "circle",
-     "instructions": ["Look straight ahead", "Slowly trace a circle clockwise",
-                      "Now counter-clockwise", "Return to center"]},
-    {"name": "Near-Far Focus", "duration": 20, "type": "depth",
-     "instructions": ["Hold thumb 6 inches away", "Focus on thumb for 3 seconds",
-                      "Focus on something far away", "Alternate 3 more times"]},
-    {"name": "Figure Eight", "duration": 20, "type": "figure8",
-     "instructions": ["Imagine a large figure 8 on its side", "Trace it with your eyes",
-                      "Keep your head still", "Blink and relax"]},
-]
-
-# ─── Desk Exercise Data ──────────────────────────────────────
-DESK_EXERCISES = [
-    {"name": "Shoulder Rolls", "duration": 20,
-     "instruction": "Roll shoulders backward in slow circles",
-     "frames": ["  O  \n /|\\ \n / \\", "  O  \n↗|↖\n / \\",
-                "  O  \n ↑|↑\n / \\", "  O  \n↘|↙\n / \\"]},
-    {"name": "Neck Stretch", "duration": 20,
-     "instruction": "Tilt head slowly to each side, hold 5 seconds",
-     "frames": [" O \n | \n/|\\", "O  \n \\ \n/|\\", " O \n | \n/|\\", "  O\n / \n/|\\"]},
-    {"name": "Wrist Circles", "duration": 20,
-     "instruction": "Rotate wrists in circles, both directions",
-     "frames": ["  O  \n /|\\ \n↻ ↺", "  O  \n /|\\ \n↺ ↻"]},
-]
-
 # ─── Test Mode Intervals ─────────────────────────────────────
 if TEST_MODE:
     print("\n  ⚠  TEST MODE: Using short intervals")
@@ -948,14 +912,13 @@ class ScreenBreakApp:
         self.last_any_break = datetime.datetime.now()
         self.acked_today   = {};  self.today = datetime.date.today()
         self._warn_anim_id = None;  self._warn_rem = 0;  self._warn_total = 0
-        self._status_win = None;  self._tip = None;  self._stats_win = None;  self._notes_win = None
+        self._status_win = None;  self._tip = None;  self._stats_win = None;  self._notes_win = None;  self._msg_editor_win = None
 
         if HAS_TRAY:
             threading.Thread(target=self._run_tray, daemon=True).start()
 
         self.last_mini_reminder = datetime.datetime.now()
         self._mini_win = None
-        self._pomodoro_count = 0  # Track pomodoro sessions for long break timing
         self.last_hydration_reminder = datetime.datetime.now()
         self._hydration_win = None
         self.fullscreen_active = False  # Track fullscreen state
@@ -982,6 +945,16 @@ class ScreenBreakApp:
         self._tick()
         self.root.mainloop()
 
+    def _is_work_hours(self) -> bool:
+        """Check if current time is within configured work hours."""
+        try:
+            t = datetime.datetime.now().time()
+            ws = self._pt(self.config.get("work_start", "08:00"))
+            we = self._pt(self.config.get("work_end", "20:00"))
+            return ws <= t < we
+        except ValueError:
+            return True  # If parsing fails, assume work hours
+
     def _start_mini_reminders(self) -> None:
         """Start mini reminder system (posture, hydration, blink nudges)."""
         def check_mini():
@@ -989,6 +962,12 @@ class ScreenBreakApp:
                 self.root.after(60000, check_mini)  # Check again in 1 min
                 return
             if self.paused or self.idle or self.overlay_up or self.warning_up:
+                self.root.after(60000, check_mini)
+                return
+            if not self._is_work_hours():
+                self.root.after(60000, check_mini)
+                return
+            if self.config.get("focus_mode", False) and self.fullscreen_active:
                 self.root.after(60000, check_mini)
                 return
 
@@ -1056,6 +1035,9 @@ class ScreenBreakApp:
             if self.paused or self.idle or self.overlay_up or self.warning_up:
                 self.root.after(60000, check_hydration)
                 return
+            if not self._is_work_hours():
+                self.root.after(60000, check_hydration)
+                return
             # Check if fullscreen mode should block
             if self.config.get("focus_mode", False) and self.fullscreen_active:
                 self.root.after(60000, check_hydration)
@@ -1110,11 +1092,17 @@ class ScreenBreakApp:
         def log_drink():
             log_hydration(self.stats)
             save_stats(self.stats)
-            win.destroy()
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
             self._hydration_win = None
 
         def dismiss():
-            win.destroy()
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
             self._hydration_win = None
 
         tk.Button(bf, text="  +1 Glass  ", font=(FONT, 10), bg=C_BTN_PRI, fg=C_TEXT,
@@ -1125,20 +1113,26 @@ class ScreenBreakApp:
         self._hydration_win = win
 
         # Auto-dismiss after 30 seconds
-        win.after(30000, lambda: dismiss() if win.winfo_exists() else None)
+        def auto_dismiss():
+            try:
+                if win.winfo_exists():
+                    dismiss()
+            except tk.TclError:
+                pass
+        win.after(30000, auto_dismiss)
 
     # ── Focus Sessions ─────────────────────────────────────────
     def _show_focus_session_dialog(self) -> None:
         """Show dialog to start a new focus session, or close if running."""
         # If focus session timer is running, close it
-        if hasattr(self, '_focus_win') and self._focus_win:
+        if self._focus_win:
             try:
                 if self._focus_win.winfo_exists():
                     # End the session
-                    if hasattr(self, '_focus_timer_id') and self._focus_timer_id:
+                    if self._focus_timer_id:
                         try:
                             self.root.after_cancel(self._focus_timer_id)
-                        except:
+                        except (tk.TclError, ValueError):
                             pass
                         self._focus_timer_id = None
                     self._focus_win.destroy()
@@ -1148,7 +1142,7 @@ class ScreenBreakApp:
                 self._focus_win = None
 
         # If dialog is already open, focus it
-        if hasattr(self, '_focus_dialog') and self._focus_dialog:
+        if self._focus_dialog:
             try:
                 if self._focus_dialog.winfo_exists():
                     self._focus_dialog.lift()
@@ -1201,9 +1195,11 @@ class ScreenBreakApp:
         def start_session():
             task = task_entry.get().strip() or "Focus Session"
             try:
-                duration = int(dur_spin.get())
+                duration = max(1, min(120, int(dur_spin.get())))
             except ValueError:
                 duration = 25
+            self.config["focus_session_duration"] = duration
+            save_config(self.config)
             self._focus_dialog = None
             win.destroy()
             self._start_focus_session(task, duration)
@@ -1260,16 +1256,16 @@ class ScreenBreakApp:
 
         # End button
         def end_session(completed=False):
-            if hasattr(self, '_focus_timer_id') and self._focus_timer_id:
+            if self._focus_timer_id:
                 try:
                     self.root.after_cancel(self._focus_timer_id)
-                except:
+                except (tk.TclError, ValueError):
                     pass
             self._focus_timer_id = None
             if self._focus_win:
                 try:
                     self._focus_win.destroy()
-                except:
+                except tk.TclError:
                     pass
                 self._focus_win = None
             if completed:
@@ -1293,12 +1289,19 @@ class ScreenBreakApp:
                 return
             m, s = divmod(self._focus_remaining, 60)
             self._focus_timer_var.set(f"{m}:{s:02d}")
-            self._focus_remaining -= 1
+            # Only decrement when not paused and not idle
+            if not self.paused and not self.idle:
+                self._focus_remaining -= 1
             self._focus_timer_id = self.root.after(1000, tick)
 
         self._focus_timer_id = self.root.after(1000, tick)
 
-        # Allow dragging
+        # Escape to end session
+        win.bind("<Escape>", lambda e: end_session(False))
+        # Right-click to end session
+        win.bind("<Button-3>", lambda e: end_session(False))
+
+        # Allow dragging (left-click on frame, not buttons)
         def start_drag(e):
             win._drag_x = e.x
             win._drag_y = e.y
@@ -1306,8 +1309,8 @@ class ScreenBreakApp:
             x = win.winfo_x() + e.x - win._drag_x
             y = win.winfo_y() + e.y - win._drag_y
             win.geometry(f"+{x}+{y}")
-        win.bind("<Button-1>", start_drag)
-        win.bind("<B1-Motion>", do_drag)
+        f.bind("<Button-1>", start_drag)
+        f.bind("<B1-Motion>", do_drag)
 
     def _start_idle_monitor(self) -> None:
         """Start idle detection monitoring."""
@@ -1327,11 +1330,14 @@ class ScreenBreakApp:
                 # Just became idle - record when
                 self.idle_since = datetime.datetime.now()
             elif not self.idle and was_idle and self.idle_since:
-                # Returned from idle - adjust timers
-                idle_duration = datetime.datetime.now() - self.idle_since
-                self.last_eye_rest += idle_duration
-                self.last_micro += idle_duration
-                self.last_any_break += idle_duration
+                # Returned from idle - adjust timers (skip if paused; pause resume handles it)
+                if not self.paused:
+                    idle_duration = datetime.datetime.now() - self.idle_since
+                    self.last_eye_rest += idle_duration
+                    self.last_micro += idle_duration
+                    self.last_any_break += idle_duration
+                    self.last_mini_reminder += idle_duration
+                    self.last_hydration_reminder += idle_duration
                 self.idle_since = None
 
             self.root.after(IDLE_CHECK_INTERVAL * 1000, check_idle)
@@ -1355,18 +1361,10 @@ class ScreenBreakApp:
         b = self.config.get("micro_pause_interval", 45)
         return b * (self.config.get("low_energy_multiplier", 1.5) if self.low_energy else 1.0)
 
-    @property
-    def pomodoro_break_duration(self) -> int:
-        """Pomodoro break duration in minutes (5 regular, 15 every 4th)."""
-        if hasattr(self, '_pomodoro_count'):
-            if self._pomodoro_count > 0 and self._pomodoro_count % 4 == 0:
-                return 15  # Long break every 4 pomodoros
-        return 5  # Regular short break
-
     @staticmethod
     def _pt(s: str) -> datetime.time:
         """Parse time string (HH:MM) to datetime.time. Raises ValueError if invalid."""
-        h, m = s.strip().split(":")
+        h, m = str(s).strip().split(":")
         return datetime.time(int(h), int(m))
 
     @staticmethod
@@ -1391,6 +1389,11 @@ class ScreenBreakApp:
         else:
             self.fullscreen_active = False
 
+        # Safety valve: if warning_up is stuck but window is gone, clear it
+        if self.warning_up and not self.warning_window:
+            self.warning_up = False
+            self.pending_break = None
+
         # Skip break checking if paused, in break, idle, or in fullscreen focus mode
         if not self.paused and not self.overlay_up and not self.warning_up and not self.idle:
             if not (self.config.get("focus_mode", False) and self.fullscreen_active):
@@ -1404,13 +1407,15 @@ class ScreenBreakApp:
         if now.date() != self.today:
             self.today = now.date()
             self.acked_today.clear()
+            update_stats_for_today(self.stats)
+            save_stats(self.stats)
 
         try:
             ws = self._pt(self.config.get("work_start", "08:00"))
             we = self._pt(self.config.get("work_end",   "20:00"))
         except ValueError:
             ws, we = datetime.time(8), datetime.time(20)
-        if t < ws or t > we:
+        if t < ws or t >= we:
             return
 
         if self.snooze_until and now < self.snooze_until:
@@ -1597,7 +1602,13 @@ class ScreenBreakApp:
             self._fire_pending()
 
     def _fire_pending(self) -> None:
-        self.warning_up = False;  self._warn_anim_id = None
+        self.warning_up = False
+        if self._warn_anim_id:
+            try:
+                self.root.after_cancel(self._warn_anim_id)
+            except (tk.TclError, ValueError):
+                pass
+            self._warn_anim_id = None
         if self._tip:
             try:
                 self._tip.destroy()
@@ -1663,11 +1674,29 @@ class ScreenBreakApp:
         mx, my, mw, mh = monitors[0]
         sw = mw if mw else ov.winfo_screenwidth()
         sh = mh if mh else ov.winfo_screenheight()
-        ov.geometry(f"{sw}x{sh}+0+0")
+        ov.geometry(f"{sw}x{sh}+{mx}+{my}")
         ov.overrideredirect(True)
-        if IS_MAC:
-            ov.lift()
-            ov.focus_force()
+        ov.lift()
+        ov.focus_force()
+
+        # Create dim overlays on secondary monitors
+        for mon in monitors[1:]:
+            sx, sy, smw, smh = mon
+            if smw and smh:
+                sec = tk.Toplevel(self.root)
+                sec.overrideredirect(True)
+                sec.attributes("-topmost", True)
+                sec.configure(bg=C_EYE_BG)
+                sec.geometry(f"{smw}x{smh}+{sx}+{sy}")
+                try:
+                    sec.attributes("-alpha", 0.85)
+                except tk.TclError:
+                    pass
+                # Simple centered message
+                tk.Label(sec, text="🌿\nLook away — rest your eyes", font=(FONT, 20),
+                         fg=C_EYE_ACC, bg=C_EYE_BG, justify="center"
+                         ).place(relx=0.5, rely=0.5, anchor="center")
+                self._eye_overlays.append(sec)
 
         # Screen dimming effect - start transparent and fade in
         use_dim = self.config.get("screen_dim", True)
@@ -1769,6 +1798,13 @@ class ScreenBreakApp:
         if self._eye_exercise:
             self._eye_exercise.stop()
             self._eye_exercise = None
+        # Destroy secondary monitor overlays
+        for sec_ov in getattr(self, '_eye_overlays', [])[1:]:
+            try:
+                sec_ov.destroy()
+            except tk.TclError:
+                pass
+        self._eye_overlays = []
         # Eye rest only resets eye timer and 20-min gap
         # Does NOT reset micro-pause — looking away isn't the same as standing up
         now = datetime.datetime.now()
@@ -1802,7 +1838,7 @@ class ScreenBreakApp:
         ov = tk.Toplevel(self.root)
         ov.overrideredirect(True);  ov.attributes("-topmost", True)
         ov.configure(bg=C_BG);  self._centre(ov, 500, win_height)
-        if IS_MAC: ov.lift()
+        ov.lift();  ov.focus_force()
 
         card = tk.Frame(ov, bg=C_CARD, padx=32, pady=22)
         card.pack(fill="both", expand=True, padx=2, pady=2)
@@ -1810,8 +1846,11 @@ class ScreenBreakApp:
         tk.Label(card, text="🧘  Time to move", font=(FONT, 16, "bold"),
                  fg=C_ACCENT, bg=C_CARD).pack(pady=(0, 10))
 
-        # Show exercise suggestion if enabled
-        if self.config.get("show_exercises", True):
+        # Show custom message or exercise suggestion
+        if self.config.get("use_custom_messages") and self.config.get("custom_messages"):
+            custom_msg = random.choice(self.config["custom_messages"])
+            body = f"~{iv} minutes of focus — well done.\n\n💬 {custom_msg}"
+        elif self.config.get("show_exercises", True):
             exercise = get_exercise("stretch")
             body = f"~{iv} minutes of focus — well done.\n\n💪 {exercise}"
         elif self.low_energy:
@@ -1884,9 +1923,6 @@ class ScreenBreakApp:
             self.stats["lifetime"]["micro_taken"] = self.stats["lifetime"].get("micro_taken", 0) + 1
             self.stats["today"]["micro_taken"] = self.stats["today"].get("micro_taken", 0) + 1
             save_stats(self.stats)
-            # Track pomodoro count for long break timing
-            if self.config.get("pomodoro_mode", False):
-                self._pomodoro_count += 1
             self._reset_all_timers()
             self._dismiss(ov)
 
@@ -1901,9 +1937,16 @@ class ScreenBreakApp:
             self._reset_all_timers()
             self._dismiss(ov)
 
+        def snooze_micro():
+            if self._breathing_exercise:
+                self._breathing_exercise.stop()
+            if self._desk_exercise:
+                self._desk_exercise.stop()
+            self._snooze(ov)
+
         self._btn(bf, "  Back from break  ", C_BTN_PRI, back_from_break)
         # In strict mode, only show snooze (no skip option via Escape)
-        self._btn(bf, f"  {sm} more min  ", C_BTN_SEC, lambda: self._snooze(ov))
+        self._btn(bf, f"  {sm} more min  ", C_BTN_SEC, snooze_micro)
         self.current_overlay = ov
 
         # Start the 5-minute countdown
@@ -1939,7 +1982,7 @@ class ScreenBreakApp:
         ov = tk.Toplevel(self.root)
         ov.overrideredirect(True);  ov.attributes("-topmost", True)
         ov.configure(bg=C_BG);  self._centre(ov, 560, 460)
-        if IS_MAC: ov.lift();  ov.focus_force()
+        ov.lift();  ov.focus_force()
 
         card = tk.Frame(ov, bg=C_CARD, padx=32, pady=20)
         card.pack(fill="both", expand=True, padx=2, pady=2)
@@ -1948,8 +1991,11 @@ class ScreenBreakApp:
                  fg=C_ACCENT, bg=C_CARD).pack(pady=(0, 10))
         body = get_desc(title, self.low_energy)
 
-        # Add movement suggestion if enabled
-        if self.config.get("show_exercises", True) and duration >= 10:
+        # Add custom message or movement suggestion
+        if self.config.get("use_custom_messages") and self.config.get("custom_messages"):
+            custom_msg = random.choice(self.config["custom_messages"])
+            body = body + f"\n\n💬 {custom_msg}"
+        elif self.config.get("show_exercises", True) and duration >= 10:
             exercise = get_exercise("move")
             body = body + f"\n\n🚶 {exercise}"
 
@@ -2023,7 +2069,7 @@ class ScreenBreakApp:
         return []
 
     def _show_notes_win(self) -> None:
-        if hasattr(self, '_notes_win') and self._notes_win:
+        if self._notes_win:
             try: self._notes_win.lift();  self._notes_win.focus_force();  return
             except tk.TclError: self._notes_win = None
 
@@ -2049,7 +2095,7 @@ class ScreenBreakApp:
             txt.insert("end", "No notes yet.\n\nNotes captured during break prompts appear here.")
         else:
             for e in reversed(self.notes):
-                txt.insert("end", f"── {e['time']} ──\n{e['note']}\n\n")
+                txt.insert("end", f"── {e.get('time', 'Unknown')} ──\n{e.get('note', '')}\n\n")
         txt.configure(state="disabled")
 
         bf = tk.Frame(win, bg=C_BG)
@@ -2065,6 +2111,7 @@ class ScreenBreakApp:
             confirm.geometry("300x120")
             confirm.transient(win)
             confirm.grab_set()
+            confirm.protocol("WM_DELETE_WINDOW", confirm.destroy)
             # Center on parent
             confirm.geometry(f"+{win.winfo_x() + 140}+{win.winfo_y() + 150}")
 
@@ -2102,7 +2149,7 @@ class ScreenBreakApp:
                 with open(export_path, "w", encoding="utf-8") as f:
                     f.write("# Screen Break Notes\n\n")
                     for e in self.notes:
-                        f.write(f"## {e['time']}\n\n{e['note']}\n\n---\n\n")
+                        f.write(f"## {e.get('time', 'Unknown')}\n\n{e.get('note', '')}\n\n---\n\n")
                 # Show brief confirmation
                 txt.configure(state="normal")
                 txt.insert("1.0", f"✓ Exported to {export_path}\n\n")
@@ -2112,12 +2159,18 @@ class ScreenBreakApp:
                 txt.insert("1.0", f"⚠ Export failed: {err}\n\n")
                 txt.configure(state="disabled")
 
+        def on_close():
+            self._notes_win = None
+            win.destroy()
+
         tk.Button(bf, text="Export .md", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
                   relief="flat", padx=12, pady=4, cursor="hand2", command=export_notes).pack(side="left", padx=4)
         tk.Button(bf, text="Clear All", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
                   relief="flat", padx=12, pady=4, cursor="hand2", command=clear_notes).pack(side="left", padx=4)
         tk.Button(bf, text="Close", font=(FONT, 10), bg=C_BTN_SEC, fg=C_TEXT,
-                  relief="flat", padx=16, pady=4, cursor="hand2", command=win.destroy).pack(side="left", padx=4)
+                  relief="flat", padx=16, pady=4, cursor="hand2", command=on_close).pack(side="left", padx=4)
+
+        win.protocol("WM_DELETE_WINDOW", on_close)
 
     # ━━━ Statistics Window ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -2261,6 +2314,7 @@ class ScreenBreakApp:
             confirm.geometry("280x100")
             confirm.transient(win)
             confirm.grab_set()
+            confirm.protocol("WM_DELETE_WINDOW", confirm.destroy)
             confirm.geometry(f"+{win.winfo_x() + 60}+{win.winfo_y() + 150}")
             tk.Label(confirm, text="Reset all statistics?", font=(FONT, 11, "bold"),
                      fg=C_TEXT, bg=C_CARD).pack(pady=(14, 6))
@@ -2277,14 +2331,15 @@ class ScreenBreakApp:
             tk.Button(cbf, text="Cancel", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT,
                       relief="flat", padx=12, pady=4, cursor="hand2", command=confirm.destroy).pack(side="left", padx=4)
 
-        tk.Button(bf, text="Reset Stats", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
-                  relief="flat", padx=12, pady=4, cursor="hand2", command=reset_stats).pack(side="left", padx=4)
-        tk.Button(bf, text="Close", font=(FONT, 10), bg=C_BTN_SEC, fg=C_TEXT,
-                  relief="flat", padx=16, pady=4, cursor="hand2", command=win.destroy).pack(side="left", padx=4)
-
         def on_close():
             self._stats_win = None
             win.destroy()
+
+        tk.Button(bf, text="Reset Stats", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=12, pady=4, cursor="hand2", command=reset_stats).pack(side="left", padx=4)
+        tk.Button(bf, text="Close", font=(FONT, 10), bg=C_BTN_SEC, fg=C_TEXT,
+                  relief="flat", padx=16, pady=4, cursor="hand2", command=on_close).pack(side="left", padx=4)
+
         win.protocol("WM_DELETE_WINDOW", on_close)
 
     # ━━━ Status & Settings Window ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -2738,11 +2793,25 @@ class ScreenBreakApp:
 
     def _show_message_editor(self) -> None:
         """Show editor for custom break messages."""
+        if hasattr(self, '_msg_editor_win') and self._msg_editor_win:
+            try:
+                self._msg_editor_win.lift()
+                self._msg_editor_win.focus_force()
+                return
+            except tk.TclError:
+                self._msg_editor_win = None
+
         win = tk.Toplevel(self.root)
         win.title("Custom Break Messages")
         win.geometry("450x350")
         win.configure(bg=C_BG)
         win.transient(self._status_win)
+        self._msg_editor_win = win
+
+        def on_close():
+            self._msg_editor_win = None
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", on_close)
 
         tk.Label(win, text="Custom Break Messages", font=(FONT, 13, "bold"),
                  fg=C_ACCENT2, bg=C_BG).pack(pady=(14, 8))
@@ -2761,14 +2830,14 @@ class ScreenBreakApp:
             content = txt.get("1.0", "end").strip()
             self.config["custom_messages"] = [m.strip() for m in content.split("\n") if m.strip()]
             save_config(self.config)
-            win.destroy()
+            on_close()
 
         bf = tk.Frame(win, bg=C_BG)
         bf.pack(pady=(0, 14))
         tk.Button(bf, text="Save", font=(FONT, 10), bg=C_BTN_PRI, fg=C_TEXT,
                   relief="flat", padx=16, pady=5, cursor="hand2", command=save_messages).pack(side="left", padx=4)
         tk.Button(bf, text="Cancel", font=(FONT, 10), bg=C_BTN_SEC, fg=C_TEXT_DIM,
-                  relief="flat", padx=12, pady=5, cursor="hand2", command=win.destroy).pack(side="left")
+                  relief="flat", padx=12, pady=5, cursor="hand2", command=on_close).pack(side="left")
 
     def _apply_settings(self) -> None:
         try:
@@ -2790,12 +2859,15 @@ class ScreenBreakApp:
                 self._save_fb.set("⚠ Warning must be ≥ 10 sec");  return
             if idle_threshold < 60:
                 self._save_fb.set("⚠ Idle threshold must be ≥ 60 sec");  return
+            if gap > eye:
+                self._save_fb.set("⚠ Break gap must not exceed eye rest interval");  return
 
             ws = self._ws_entry.get().strip()
             we = self._we_entry.get().strip()
             for ts in [ws, we]:
                 h, m = ts.split(":")
-                assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
+                if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+                    raise ValueError("Invalid time")
 
             breaks = []
             for row in self._brk_rows:
@@ -2805,7 +2877,8 @@ class ScreenBreakApp:
                 if not t or not n:
                     continue
                 h, m = t.split(":")
-                assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
+                if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+                    raise ValueError("Invalid break time")
                 breaks.append({"time": f"{int(h):02d}:{int(m):02d}", "duration": d, "title": n})
 
             breaks.sort(key=lambda b: b["time"])
@@ -2864,10 +2937,13 @@ class ScreenBreakApp:
             self._reset_all_timers()
 
             self._save_fb.set("✓ Saved — timers reset")
-            self._status_win.after(4000, lambda: self._save_fb.set(""))
+            def _clear_fb():
+                try: self._save_fb.set("")
+                except tk.TclError: pass
+            self._status_win.after(4000, _clear_fb)
 
-        except (ValueError, AssertionError):
-            self._save_fb.set("⚠ Invalid input — check time format (HH:MM)")
+        except ValueError:
+            self._save_fb.set("⚠ Invalid input — check numbers and time format")
 
     def _reset_defaults(self) -> None:
         dc = json.loads(json.dumps(DEFAULT_CONFIG))
@@ -2916,9 +2992,17 @@ class ScreenBreakApp:
 
         self._reset_all_timers()
         self._save_fb.set("✓ Reset to defaults")
-        self._status_win.after(4000, lambda: self._save_fb.set(""))
+        def _clear_fb():
+            try: self._save_fb.set("")
+            except tk.TclError: pass
+        self._status_win.after(4000, _clear_fb)
 
     def _close_status(self) -> None:
+        # Clean up global mousewheel binding from settings scroll area
+        try:
+            self.root.unbind_all("<MouseWheel>")
+        except tk.TclError:
+            pass
         if self._status_win:
             try:
                 self._status_win.destroy()
@@ -3025,7 +3109,9 @@ class ScreenBreakApp:
         if not self._status_win:
             return
         try:
-            self._status_win.winfo_exists()
+            if not self._status_win.winfo_exists():
+                self._status_win = None
+                return
         except tk.TclError:
             self._status_win = None
             return
@@ -3040,7 +3126,7 @@ class ScreenBreakApp:
         try:
             ws = self._pt(self.config.get("work_start", "08:00"))
             we = self._pt(self.config.get("work_end", "20:00"))
-            outside_hours = t < ws or t > we
+            outside_hours = t < ws or t >= we
         except ValueError:
             pass
 
@@ -3049,6 +3135,12 @@ class ScreenBreakApp:
         if outside_hours:
             tv.set("—")
             dv.set("outside work hours")
+        elif self.idle:
+            tv.set("IDLE")
+            dv.set("timers paused — awaiting activity")
+        elif self.config.get("focus_mode", False) and self.fullscreen_active:
+            tv.set("PRESENTING")
+            dv.set("auto-paused — fullscreen detected")
         elif self.paused:
             tv.set("PAUSED")
             dv.set(f"every {int(self.eye_iv)} min")
@@ -3064,6 +3156,12 @@ class ScreenBreakApp:
         if outside_hours:
             tv.set("—")
             dv.set("outside work hours")
+        elif self.idle:
+            tv.set("IDLE")
+            dv.set("timers paused — awaiting activity")
+        elif self.config.get("focus_mode", False) and self.fullscreen_active:
+            tv.set("PRESENTING")
+            dv.set("auto-paused — fullscreen detected")
         elif self.paused:
             tv.set("PAUSED")
             dv.set(f"every {int(self.micro_iv)} min")
@@ -3088,14 +3186,14 @@ class ScreenBreakApp:
                 if self.acked_today.get(key) == now.date(): continue
                 try:
                     bt = datetime.datetime.combine(now.date(), self._pt(brk["time"]))
-                except: continue
+                except (ValueError, AttributeError): continue
                 diff = (bt - now).total_seconds()
                 if diff > -60 and (nxt is None or diff < nxt[0]):
                     dl = f" ({brk['duration']}m)" if brk["duration"] > 0 else ""
                     nxt = (diff, f"{self._fmt12(brk['time'])} — {brk['title']}{dl}")
             dv.set(nxt[1] if nxt else "no more scheduled breaks today")
         elif self.warning_up and self.pending_break:
-            tv.set(f"0:{self._warn_rem:02d}")
+            tv.set(f"00:{self._warn_rem:02d}")
             dv.set("⏳ break imminent")
         else:
             nxt = None
@@ -3104,7 +3202,7 @@ class ScreenBreakApp:
                 if self.acked_today.get(key) == now.date(): continue
                 try:
                     bt = datetime.datetime.combine(now.date(), self._pt(brk["time"]))
-                except: continue
+                except (ValueError, AttributeError): continue
                 diff = (bt - now).total_seconds()
                 if diff > -60 and (nxt is None or diff < nxt[0]):
                     dl = f" ({brk['duration']}m)" if brk["duration"] > 0 else ""
@@ -3153,8 +3251,15 @@ class ScreenBreakApp:
             except tk.TclError:
                 pass
         ov.bind("<Button-1>", dismiss)
+        for child in ov.winfo_children():
+            child.bind("<Button-1>", dismiss)
         # Also auto-close after a few seconds
         ov.after(STARTUP_DISMISS_MS, dismiss)
+
+        # If no tray, bind Ctrl+Q globally as a quit shortcut
+        if not HAS_TRAY:
+            self.root.bind_all("<Control-q>", lambda e: self._quit())
+            self.root.bind_all("<Control-Q>", lambda e: self._quit())
 
     def _print_schedule(self):
         print()
@@ -3237,10 +3342,10 @@ class ScreenBreakApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 lambda item: "▶  Resume" if self.paused else "⏸  Pause",
-                lambda icon, item: self._toggle_pause()),
+                lambda icon, item: self.root.after(0, self._toggle_pause)),
             pystray.MenuItem(
                 lambda item: "✓  Gentle mode" if self.low_energy else "🪫  Gentle mode",
-                lambda icon, item: self._toggle_low_energy()),
+                lambda icon, item: self.root.after(0, self._toggle_low_energy)),
             pystray.MenuItem("📊  Statistics",
                 lambda icon, item: self.root.after(0, self._show_stats_win)),
             pystray.MenuItem("📝  Notes",
@@ -3276,6 +3381,7 @@ class ScreenBreakApp:
         # The computed properties (eye_iv, micro_iv) will automatically adjust
 
     def _quit(self, icon: Optional[Any] = None, item: Optional[Any] = None) -> None:
+        save_stats(self.stats)
         if HAS_TRAY and hasattr(self, "tray"):
             self.tray.stop()
         self.root.after(0, self.root.quit)
