@@ -4,7 +4,7 @@ Complete technical documentation for the ScreenBreak application. Use this file 
 
 ## Architecture Overview
 
-**Single-file application:** `screen_break.py` (~3100 lines)
+**Single-file application:** `screen_break.py` (~3450 lines)
 - Pure Python + tkinter (no external GUI frameworks)
 - System tray integration via `pystray`
 - Cross-platform: Windows, macOS, Linux
@@ -248,10 +248,17 @@ Canvas-based breathing animation.
 
 ## Known Issues & Edge Cases
 
-1. **Test mode intervals:** Use `--test` flag for 2-minute eye rest, 5-minute micro-pause
+1. **Test mode intervals:** Use `--test` flag for 1-minute eye rest, 2-minute micro-pause
 2. **Fullscreen detection:** Windows-only via ctypes; other platforms skip this check
 3. **Multi-monitor:** Requires `screeninfo` package; gracefully falls back to single monitor
 4. **Sound playback:** Windows MCI for custom sounds; system beep as fallback
+5. **Console encoding:** All `print()` output must use ASCII only — Windows cp1252 crashes on Unicode/emoji
+
+### Open TODOs (v2.1+)
+- **Icon:** Win 3.1 crosshatch icon code exists but exe/tray icon not rendering properly. Cosmetic only — does not affect functionality.
+- **Circle Trace animation:** Eye exercise dot movement appears jerky. Likely needs shorter `after()` interval for smoother framerate.
+- **Notes during breaks:** No text input in break overlays. The Notes system exists but notes can only be viewed/exported, not entered during breaks. Should add an auto-saving text field to break overlays.
+- **Pre-break warning:** The 1-minute warning countdown (top-right corner) is not appearing. Warning code exists (`_show_warning`) but may not be triggering correctly.
 
 ---
 
@@ -291,14 +298,20 @@ git push origin v2.0.0
 
 ```
 ScreenBreak/
-├── screen_break.py      # Main application (single file)
-├── screen_break.spec    # PyInstaller build spec
-├── icon.ico             # Windows icon (generated)
-├── icon.png             # PNG icon (generated)
-├── README.md            # User documentation
-├── PROJECT.md           # This file (developer docs)
-├── PLAN.md              # Original feature plan
+├── screen_break.py          # Main application (single file, ~3450 lines)
+├── screen_break.spec         # PyInstaller build spec (generates icon on build)
+├── generate_icon_win31.py    # Standalone Win 3.1 style icon generator
+├── icon.ico                  # Windows icon (generated, multi-size)
+├── icon.png                  # PNG icon (generated, 256px)
+├── README.md                 # User documentation
+├── PROJECT.md                # This file (developer docs)
+├── .gitignore                # Ignores build/, dist/, __pycache__/
 └── .github/
     └── workflows/
-        └── release.yml  # CI/CD for releases
+        └── release.yml       # CI/CD for releases
 ```
+
+## Version History
+
+- **v2.0** — Initial premium features release (themes, exercises, hydration, focus sessions, etc.)
+- **v2.1** — 25 code review fixes across 5 rounds (custom messages wired in, gap validation, presentation mode, TclError protection, idle recovery, focus session improvements, stats saved on quit, etc.) + Win 3.1 icon (WIP) + Unicode crash fix
