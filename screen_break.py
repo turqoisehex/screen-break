@@ -63,6 +63,8 @@ HAS_TRAY = _ensure_deps()
 # ─── Imports ──────────────────────────────────────────────────
 import threading, datetime, json, math, random
 from typing import Any, Callable, Optional
+import random
+import math
 
 if HAS_TRAY:
     try:
@@ -101,7 +103,7 @@ TEST_MODE = _args.test
 # ─── Named Constants ─────────────────────────────────────────
 SLEEP_DETECTION_MINUTES = 120      # If >2 hours since last check, assume laptop slept
 CATCHUP_WINDOW_SECONDS = 180       # Catch-up window for scheduled breaks (3 minutes)
-COAST_MARGIN_MINUTES = 5           # Skip eye/micro if scheduled break within this margin
+DEFAULT_COAST_MARGIN = 10          # Default coast margin (now configurable)
 STARTUP_DISMISS_MS = 6000          # Auto-dismiss startup notification after 6 seconds
 WARNING_ICON_SIZE = 62             # Size of warning clock icon (larger for visibility)
 WARNING_ICON_MARGIN = 18           # Margin from screen edge
@@ -151,8 +153,53 @@ def get_idle_seconds() -> float:
     return 0.0
 
 # ─── Sound System ─────────────────────────────────────────────
-def play_sound(sound_type: str = "chime") -> None:
-    """Play a notification sound. Types: 'chime', 'complete', 'warning'"""
+def play_sound(sound_type: str = "chime", custom_path: str = None) -> None:
+    """Play a notification sound. Supports mp3, wav, and other common formats."""
+    # Try custom sound first
+    if custom_path and os.path.exists(custom_path):
+        try:
+            if IS_WIN:
+                # Use Windows MCI (Media Control Interface) - plays mp3, wav, wma, etc. natively
+                import ctypes
+                winmm = ctypes.windll.winmm
+                # Unique alias for this playback
+                alias = f"sound_{id(custom_path)}"
+                # Open and play asynchronously
+                winmm.mciSendStringW(f'open "{custom_path}" alias {alias}', None, 0, None)
+                winmm.mciSendStringW(f'play {alias}', None, 0, None)
+                # Schedule cleanup after 30 seconds (generous for any sound)
+                import threading
+                def cleanup():
+                    import time; time.sleep(30)
+                    try: winmm.mciSendStringW(f'close {alias}', None, 0, None)
+                    except: pass
+                threading.Thread(target=cleanup, daemon=True).start()
+                return
+            elif IS_MAC:
+                import subprocess
+                subprocess.Popen(["afplay", custom_path])
+                return
+            else:  # Linux
+                import subprocess
+                # Try common Linux audio players in order of likelihood
+                players = [
+                    ["mpv", "--no-terminal", "--no-video", custom_path],
+                    ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", custom_path],
+                    ["cvlc", "--play-and-exit", "--no-video", "-q", custom_path],
+                    ["gst-play-1.0", custom_path],
+                    ["paplay", custom_path],  # PulseAudio (wav/ogg only usually)
+                    ["aplay", "-q", custom_path],  # ALSA (wav only)
+                ]
+                for cmd in players:
+                    try:
+                        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        return
+                    except FileNotFoundError:
+                        continue
+        except Exception:
+            pass  # Fall through to default
+
+    # Default system sounds
     try:
         if IS_WIN:
             import winsound
@@ -168,7 +215,6 @@ def play_sound(sound_type: str = "chime") -> None:
             subprocess.Popen(["afplay", f"/System/Library/Sounds/{sounds.get(sound_type, 'Blow')}.aiff"])
         else:  # Linux
             import subprocess
-            # Try paplay (PulseAudio) first, then aplay
             for cmd in [["paplay", "/usr/share/sounds/freedesktop/stereo/message.oga"],
                        ["aplay", "-q", "/usr/share/sounds/sound-icons/prompt.wav"]]:
                 try:
@@ -242,6 +288,236 @@ def get_mini_reminder() -> tuple[str, str, str]:
     """Get a random mini reminder (emoji, title, description)."""
     return random.choice(MINI_REMINDERS)
 
+# ─── Guided Eye Exercise Patterns ──────────────────────────────
+EYE_EXERCISE_PATTERNS = [
+    {
+        "name": "Circle Trace",
+        "instruction": "Follow the dot with your eyes",
+        "duration": 20,
+        "pattern": "circle",
+    },
+    {
+        "name": "Figure Eight",
+        "instruction": "Trace the infinity pattern",
+        "duration": 20,
+        "pattern": "figure8",
+    },
+    {
+        "name": "Near-Far Focus",
+        "instruction": "Focus near, then far",
+        "duration": 20,
+        "pattern": "nearfar",
+    },
+]
+
+# ─── Breathing Exercise Patterns ───────────────────────────────
+BREATHING_PATTERNS = {
+    "box": {"name": "Box Breathing", "phases": [("Breathe In", 4), ("Hold", 4), ("Breathe Out", 4), ("Hold", 4)]},
+    "relaxing": {"name": "4-7-8 Relaxing", "phases": [("Breathe In", 4), ("Hold", 7), ("Breathe Out", 8)]},
+    "energizing": {"name": "Energizing", "phases": [("Breathe In", 4), ("Breathe Out", 4)]},
+}
+
+# ─── Desk Exercise Animations ──────────────────────────────────
+DESK_EXERCISES = [
+    {
+        "name": "Shoulder Rolls",
+        "frames": [
+            "     O\n    /|\\\n    / \\",
+            "     O\n   //|\\\\\n    / \\",
+            "     O\n    /|\\\n    / \\",
+            "     O\n   \\\\|//\n    / \\",
+        ],
+        "instruction": "Roll shoulders forward, up, back, down",
+        "duration": 10,
+    },
+    {
+        "name": "Neck Stretch",
+        "frames": [
+            "    O\n   /|\\\n   / \\",
+            "   O \n   /|\\\n   / \\",
+            "    O\n   /|\\\n   / \\",
+            "    O\n   /|\\\n   / \\",
+            "     O\n   /|\\\n   / \\",
+        ],
+        "instruction": "Tilt head slowly: left, center, right",
+        "duration": 10,
+    },
+    {
+        "name": "Wrist Circles",
+        "frames": [
+            "   \\O/\n    |\n   / \\",
+            "   -O-\n    |\n   / \\",
+            "   /O\\\n    |\n   / \\",
+            "   -O-\n    |\n   / \\",
+        ],
+        "instruction": "Rotate wrists in circles, both directions",
+        "duration": 10,
+    },
+    {
+        "name": "Seated Twist",
+        "frames": [
+            "    O\n   /|\\\n   / \\",
+            "    O\n  //| \n   / \\",
+            "    O\n   /|\\\n   / \\",
+            "    O\n    |\\\\\n   / \\",
+        ],
+        "instruction": "Twist torso gently left and right",
+        "duration": 10,
+    },
+]
+
+class GuidedEyeExercise:
+    """Animated eye exercise with moving dot to follow."""
+
+    def __init__(self, canvas: tk.Canvas, width: int, height: int, pattern: str = "circle"):
+        self.canvas = canvas
+        self.width = width
+        self.height = height
+        self.pattern = pattern
+        self.dot = None
+        self.angle = 0
+        self.phase = 0
+        self.running = False
+
+        # Create the dot
+        self.dot = canvas.create_oval(0, 0, 30, 30, fill=C_EYE_ACC, outline="")
+        self._update_position()
+
+    def _update_position(self):
+        """Update dot position based on pattern."""
+        cx, cy = self.width // 2, self.height // 2
+        # Use most of canvas area for eye tracking (90% of half-width/height)
+        radius_x = int(self.width * 0.45)
+        radius_y = int(self.height * 0.45)
+
+        if self.pattern == "circle":
+            x = cx + radius_x * math.cos(self.angle)
+            y = cy + radius_y * math.sin(self.angle)
+        elif self.pattern == "figure8":
+            # Figure-8 pattern spanning most of canvas width
+            # Parametric: x = cos(t), y = sin(t)*cos(t) scaled
+            x = cx + radius_x * math.cos(self.angle)
+            y = cy + radius_y * math.sin(self.angle) * math.cos(self.angle)
+        elif self.pattern == "nearfar":
+            # Pulsing dot (near/far focus)
+            pulse = (math.sin(self.angle * 2) + 1) / 2  # 0 to 1
+            size = 15 + pulse * 35
+            x, y = cx, cy
+            self.canvas.coords(self.dot, x - size, y - size, x + size, y + size)
+            return
+        else:
+            x, y = cx, cy
+
+        self.canvas.coords(self.dot, x - 15, y - 15, x + 15, y + 15)
+
+    def animate(self):
+        """Advance animation one step."""
+        if not self.running:
+            return
+        self.angle += 0.08
+        if self.angle > 2 * math.pi:
+            self.angle -= 2 * math.pi
+        self._update_position()
+        self.canvas.after(50, self.animate)
+
+    def start(self):
+        self.running = True
+        self.animate()
+
+    def stop(self):
+        self.running = False
+
+
+class BreathingExercise:
+    """Animated breathing circle with phase prompts."""
+
+    def __init__(self, canvas: tk.Canvas, label: tk.Label, width: int, height: int, pattern: str = "box"):
+        self.canvas = canvas
+        self.label = label
+        self.width = width
+        self.height = height
+        self.pattern_data = BREATHING_PATTERNS.get(pattern, BREATHING_PATTERNS["box"])
+        self.phases = self.pattern_data["phases"]
+        self.phase_idx = 0
+        self.phase_time = 0
+        self.running = False
+        self.circle = None
+        self.base_radius = min(width, height) // 6
+        self.current_radius = self.base_radius
+
+        cx, cy = width // 2, height // 2
+        r = self.base_radius
+        self.circle = canvas.create_oval(cx - r, cy - r, cx + r, cy + r,
+                                         fill=C_ACCENT2, outline=C_TEXT, width=2)
+
+    def animate(self):
+        """Advance animation one step."""
+        if not self.running:
+            return
+
+        phase_name, phase_duration = self.phases[self.phase_idx]
+        progress = self.phase_time / (phase_duration * 10)  # 10 ticks per second
+
+        # Update label
+        self.label.config(text=phase_name)
+
+        # Calculate radius based on phase
+        if "In" in phase_name:
+            # Expanding
+            target = self.base_radius * 2
+            self.current_radius = self.base_radius + (target - self.base_radius) * progress
+        elif "Out" in phase_name:
+            # Contracting
+            start = self.base_radius * 2
+            self.current_radius = start - (start - self.base_radius) * progress
+        # Hold phases keep current radius
+
+        # Update circle
+        cx, cy = self.width // 2, self.height // 2
+        r = self.current_radius
+        self.canvas.coords(self.circle, cx - r, cy - r, cx + r, cy + r)
+
+        # Advance time
+        self.phase_time += 1
+        if self.phase_time >= phase_duration * 10:
+            self.phase_time = 0
+            self.phase_idx = (self.phase_idx + 1) % len(self.phases)
+
+        self.canvas.after(100, self.animate)
+
+    def start(self):
+        self.running = True
+        self.animate()
+
+    def stop(self):
+        self.running = False
+
+
+class DeskExerciseAnimation:
+    """ASCII-art frame animation for desk exercises."""
+
+    def __init__(self, label: tk.Label, exercise: dict):
+        self.label = label
+        self.frames = exercise["frames"]
+        self.frame_idx = 0
+        self.running = False
+
+    def animate(self):
+        """Show next frame."""
+        if not self.running:
+            return
+        self.label.config(text=self.frames[self.frame_idx])
+        self.frame_idx = (self.frame_idx + 1) % len(self.frames)
+        self.label.after(600, self.animate)
+
+    def start(self):
+        self.running = True
+        self.animate()
+
+    def stop(self):
+        self.running = False
+
+
 DEFAULT_CONFIG = {
     "eye_rest_interval": 20,
     "micro_pause_interval": 45,
@@ -262,6 +538,24 @@ DEFAULT_CONFIG = {
     "pomodoro_mode": False,           # Use pomodoro timing (25 work / 5 break)
     "mini_reminders": False,          # Brief posture/hydration/blink nudges
     "mini_reminder_interval": 10,     # Minutes between mini reminders
+    # Premium features
+    "coast_margin_minutes": 10,       # Skip eye/micro if scheduled break within this margin
+    "focus_mode": True,               # Auto-pause during fullscreen apps (presentation mode)
+    "multi_monitor_overlay": True,    # Show overlay on all monitors
+    "hydration_tracking": False,      # Hydration reminders
+    "hydration_goal": 8,              # Glasses per day
+    "hydration_reminder_interval": 30,# Minutes between hydration reminders
+    "custom_sound_enabled": False,    # Use custom sound file
+    "custom_sound_path": "",          # Path to custom .wav file
+    "use_custom_messages": False,     # Use custom break messages
+    "custom_messages": [],            # List of custom motivational messages
+    "theme": "nord",                  # Theme: dark, light, nord
+    "guided_eye_exercises": False,    # Animated eye exercise routines
+    "breathing_exercises": False,     # Breathing animation during breaks
+    "desk_exercises": False,          # Animated desk exercises
+    "focus_session_enabled": False,   # Pomodoro with task naming
+    "focus_session_duration": 25,     # Focus session length in minutes
+    "day_schedules": {},              # Per-day schedule overrides
     "breaks": [
         {"time": "09:45", "duration": 15, "title": "Stretch Break"},
         {"time": "11:30", "duration": 30, "title": "Movement & Mindfulness"},
@@ -332,6 +626,7 @@ DEFAULT_STATS = {
     },
     "streak_days": 0,
     "last_active_date": None,
+    "daily_history": [],  # Last 7 days: [{"date": "YYYY-MM-DD", "eye": N, "micro": N, "scheduled": N}, ...]
 }
 
 def load_stats() -> dict[str, Any]:
@@ -346,7 +641,7 @@ def load_stats() -> dict[str, Any]:
                 for key in ["lifetime", "today"]:
                     if key in saved and isinstance(saved[key], dict):
                         stats[key].update(saved[key])
-                for key in ["streak_days", "last_active_date"]:
+                for key in ["streak_days", "last_active_date", "daily_history"]:
                     if key in saved:
                         stats[key] = saved[key]
         except (json.JSONDecodeError, IOError, OSError):
@@ -365,6 +660,23 @@ def update_stats_for_today(stats: dict[str, Any]) -> None:
     """Reset today's stats if it's a new day, update streak."""
     today = datetime.date.today().isoformat()
     if stats["today"].get("date") != today:
+        # Archive previous day's stats to daily_history
+        prev_date = stats["today"].get("date")
+        if prev_date and any([stats["today"].get("eye_rest_taken", 0),
+                              stats["today"].get("micro_taken", 0),
+                              stats["today"].get("scheduled_taken", 0)]):
+            history_entry = {
+                "date": prev_date,
+                "eye": stats["today"].get("eye_rest_taken", 0),
+                "micro": stats["today"].get("micro_taken", 0),
+                "scheduled": stats["today"].get("scheduled_taken", 0),
+            }
+            if "daily_history" not in stats:
+                stats["daily_history"] = []
+            stats["daily_history"].append(history_entry)
+            # Keep only last 7 days
+            stats["daily_history"] = stats["daily_history"][-7:]
+
         # New day - check streak
         yesterday = (datetime.date.today() - datetime.timedelta(days=1)).isoformat()
         if stats["last_active_date"] == yesterday:
@@ -414,9 +726,195 @@ C_BTN_PRI  = "#1d4ed8";  C_BTN_SEC  = "#334155"
 C_TEXT     = "#f1f5f9";  C_TEXT_DIM = "#94a3b8";  C_TEXT_MUT = "#64748b"
 C_EYE_BG  = "#0c1222";  C_EYE_ACC  = "#22d3ee";  C_CD       = "#fbbf24"
 C_W_BG    = "#1a1a2e";  C_W_GL     = "#0ea5e9"
-C_OK      = "#22c55e";  C_ERR      = "#ef4444"
+C_OK      = "#22c55e";  C_ERR      = "#ef4444";  C_GENTLE  = "#2dd4bf"
 
 TICK = 10   # scheduler tick (seconds)
+
+# ─── Tooltip Helper ───────────────────────────────────────────
+class ToolTip:
+    """Simple tooltip for tkinter widgets."""
+    def __init__(self, widget, text):
+        self.widget = widget
+        self.text = text
+        self.tip = None
+        widget.bind("<Enter>", self._show)
+        widget.bind("<Leave>", self._hide)
+
+    def _show(self, event=None):
+        x, y, _, _ = self.widget.bbox("insert") if hasattr(self.widget, 'bbox') else (0, 0, 0, 0)
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 25
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(self.tip, text=self.text, font=(FONT, 9), fg=C_TEXT, bg=C_CARD,
+                         relief="solid", borderwidth=1, padx=6, pady=4)
+        label.pack()
+
+    def _hide(self, event=None):
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
+
+# ─── Themes ──────────────────────────────────────────────────
+THEMES = {
+    "dark": {
+        "bg": "#111827", "card": "#1e293b", "card_in": "#253349",
+        "accent": "#f43f5e", "accent2": "#0ea5e9",
+        "btn_pri": "#1d4ed8", "btn_sec": "#334155",
+        "text": "#f1f5f9", "text_dim": "#94a3b8", "text_mut": "#64748b",
+        "eye_bg": "#0c1222", "eye_acc": "#22d3ee", "cd": "#fbbf24",
+        "ok": "#22c55e", "err": "#ef4444", "gentle": "#2dd4bf",
+    },
+    "light": {
+        "bg": "#f8fafc", "card": "#ffffff", "card_in": "#f1f5f9",
+        "accent": "#e11d48", "accent2": "#0284c7",
+        "btn_pri": "#2563eb", "btn_sec": "#e2e8f0",
+        "text": "#1e293b", "text_dim": "#475569", "text_mut": "#94a3b8",
+        "eye_bg": "#e0f2fe", "eye_acc": "#0369a1", "cd": "#d97706",
+        "ok": "#16a34a", "err": "#dc2626", "gentle": "#0d9488",
+    },
+    "nord": {
+        "bg": "#2e3440", "card": "#3b4252", "card_in": "#434c5e",
+        "accent": "#bf616a", "accent2": "#88c0d0",
+        "btn_pri": "#5e81ac", "btn_sec": "#4c566a",
+        "text": "#eceff4", "text_dim": "#d8dee9", "text_mut": "#a3be8c",
+        "eye_bg": "#242933", "eye_acc": "#8fbcbb", "cd": "#ebcb8b",
+        "ok": "#a3be8c", "err": "#bf616a", "gentle": "#8fbcbb",
+    },
+}
+
+def apply_theme(theme_name: str) -> None:
+    """Apply a theme by updating global color constants."""
+    global C_BG, C_CARD, C_CARD_IN, C_ACCENT, C_ACCENT2
+    global C_BTN_PRI, C_BTN_SEC, C_TEXT, C_TEXT_DIM, C_TEXT_MUT
+    global C_EYE_BG, C_EYE_ACC, C_CD, C_OK, C_ERR, C_GENTLE
+
+    theme = THEMES.get(theme_name, THEMES["dark"])
+    C_BG = theme["bg"];       C_CARD = theme["card"];       C_CARD_IN = theme["card_in"]
+    C_ACCENT = theme["accent"]; C_ACCENT2 = theme["accent2"]
+    C_BTN_PRI = theme["btn_pri"]; C_BTN_SEC = theme["btn_sec"]
+    C_TEXT = theme["text"];   C_TEXT_DIM = theme["text_dim"]; C_TEXT_MUT = theme["text_mut"]
+    C_EYE_BG = theme["eye_bg"]; C_EYE_ACC = theme["eye_acc"]; C_CD = theme["cd"]
+    C_OK = theme["ok"];       C_ERR = theme["err"];         C_GENTLE = theme["gentle"]
+
+# ─── Fullscreen Detection ────────────────────────────────────
+def is_fullscreen_app_active() -> bool:
+    """Check if a fullscreen application is active (Windows only)."""
+    if not IS_WIN:
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+
+        # Get foreground window
+        hwnd = user32.GetForegroundWindow()
+        if not hwnd:
+            return False
+
+        # Get window rect
+        rect = wintypes.RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(rect))
+
+        # Get screen dimensions
+        screen_w = user32.GetSystemMetrics(0)  # SM_CXSCREEN
+        screen_h = user32.GetSystemMetrics(1)  # SM_CYSCREEN
+
+        # Check if window covers entire screen (with small margin for taskbar issues)
+        win_w = rect.right - rect.left
+        win_h = rect.bottom - rect.top
+
+        return (win_w >= screen_w - 10 and win_h >= screen_h - 10 and
+                rect.left <= 5 and rect.top <= 5)
+    except Exception:
+        return False
+
+# ─── Multi-Monitor Support ───────────────────────────────────
+try:
+    from screeninfo import get_monitors
+    HAS_SCREENINFO = True
+except ImportError:
+    HAS_SCREENINFO = False
+
+def get_all_monitors() -> list:
+    """Get list of all monitors as (x, y, width, height) tuples."""
+    if HAS_SCREENINFO:
+        try:
+            return [(m.x, m.y, m.width, m.height) for m in get_monitors()]
+        except Exception:
+            pass
+    return [(0, 0, None, None)]  # Fallback: use tkinter's screen dimensions
+
+# ─── Hydration Stats ─────────────────────────────────────────
+def get_hydration_today(stats: dict) -> int:
+    """Get today's hydration count, resetting if new day."""
+    today = datetime.date.today().isoformat()
+    hydration = stats.setdefault("hydration", {"date": None, "glasses": 0})
+    if hydration.get("date") != today:
+        hydration["date"] = today
+        hydration["glasses"] = 0
+    return hydration.get("glasses", 0)
+
+def log_hydration(stats: dict) -> int:
+    """Log a glass of water and return new count."""
+    today = datetime.date.today().isoformat()
+    hydration = stats.setdefault("hydration", {"date": today, "glasses": 0})
+    if hydration.get("date") != today:
+        hydration["date"] = today
+        hydration["glasses"] = 0
+    hydration["glasses"] = hydration.get("glasses", 0) + 1
+    return hydration["glasses"]
+
+# ─── Custom Messages ─────────────────────────────────────────
+def get_break_message(config: dict, break_type: str = "generic") -> str:
+    """Get a break message - custom if available, otherwise default."""
+    if config.get("use_custom_messages", False):
+        custom = config.get("custom_messages", [])
+        if custom:
+            return random.choice(custom)
+
+    defaults = {
+        "eye": "Your eyes deserve a rest. Look at something far away.",
+        "micro": "Time to move! A quick stretch makes a big difference.",
+        "scheduled": "You've earned this break. Step away and recharge.",
+        "generic": "Taking breaks makes you more productive, not less.",
+    }
+    return defaults.get(break_type, defaults["generic"])
+
+# ─── Breathing Exercise Data ─────────────────────────────────
+BREATHING_PATTERNS = {
+    "box": {"name": "Box Breathing", "inhale": 4, "hold1": 4, "exhale": 4, "hold2": 4},
+    "relaxing": {"name": "Relaxing Breath", "inhale": 4, "hold1": 7, "exhale": 8, "hold2": 0},
+    "energizing": {"name": "Energizing Breath", "inhale": 6, "hold1": 0, "exhale": 2, "hold2": 0},
+}
+
+# ─── Eye Exercise Data ───────────────────────────────────────
+EYE_EXERCISES = [
+    {"name": "Circle Trace", "duration": 20, "type": "circle",
+     "instructions": ["Look straight ahead", "Slowly trace a circle clockwise",
+                      "Now counter-clockwise", "Return to center"]},
+    {"name": "Near-Far Focus", "duration": 20, "type": "depth",
+     "instructions": ["Hold thumb 6 inches away", "Focus on thumb for 3 seconds",
+                      "Focus on something far away", "Alternate 3 more times"]},
+    {"name": "Figure Eight", "duration": 20, "type": "figure8",
+     "instructions": ["Imagine a large figure 8 on its side", "Trace it with your eyes",
+                      "Keep your head still", "Blink and relax"]},
+]
+
+# ─── Desk Exercise Data ──────────────────────────────────────
+DESK_EXERCISES = [
+    {"name": "Shoulder Rolls", "duration": 20,
+     "instruction": "Roll shoulders backward in slow circles",
+     "frames": ["  O  \n /|\\ \n / \\", "  O  \n↗|↖\n / \\",
+                "  O  \n ↑|↑\n / \\", "  O  \n↘|↙\n / \\"]},
+    {"name": "Neck Stretch", "duration": 20,
+     "instruction": "Tilt head slowly to each side, hold 5 seconds",
+     "frames": [" O \n | \n/|\\", "O  \n \\ \n/|\\", " O \n | \n/|\\", "  O\n / \n/|\\"]},
+    {"name": "Wrist Circles", "duration": 20,
+     "instruction": "Rotate wrists in circles, both directions",
+     "frames": ["  O  \n /|\\ \n↻ ↺", "  O  \n /|\\ \n↺ ↻"]},
+]
 
 # ─── Test Mode Intervals ─────────────────────────────────────
 if TEST_MODE:
@@ -436,6 +934,9 @@ class ScreenBreakApp:
         self.stats  = load_stats()
         update_stats_for_today(self.stats)
 
+        # Apply theme from config
+        apply_theme(self.config.get("theme", "nord"))
+
         self.paused = False;  self.low_energy = False
         self.pause_started = None  # Track when pause began for timer adjustment
         self.idle = False;  self.idle_since = None  # Idle detection state
@@ -447,7 +948,7 @@ class ScreenBreakApp:
         self.last_any_break = datetime.datetime.now()
         self.acked_today   = {};  self.today = datetime.date.today()
         self._warn_anim_id = None;  self._warn_rem = 0;  self._warn_total = 0
-        self._status_win = None;  self._tip = None;  self._stats_win = None
+        self._status_win = None;  self._tip = None;  self._stats_win = None;  self._notes_win = None
 
         if HAS_TRAY:
             threading.Thread(target=self._run_tray, daemon=True).start()
@@ -455,11 +956,29 @@ class ScreenBreakApp:
         self.last_mini_reminder = datetime.datetime.now()
         self._mini_win = None
         self._pomodoro_count = 0  # Track pomodoro sessions for long break timing
+        self.last_hydration_reminder = datetime.datetime.now()
+        self._hydration_win = None
+        self.fullscreen_active = False  # Track fullscreen state
+
+        # Animation instances for exercises
+        self._eye_exercise = None
+        self._breathing_exercise = None
+        self._desk_exercise = None
+
+        # Focus session state
+        self._focus_win = None
+        self._focus_dialog = None
+        self._focus_timer_id = None
+        self._focus_timer_var = None
+        self._focus_task = None
+        self._focus_duration = 0
+        self._focus_remaining = 0
 
         self._print_schedule()
         self._show_startup()
         self._start_idle_monitor()
         self._start_mini_reminders()
+        self._start_hydration_reminders()
         self._tick()
         self.root.mainloop()
 
@@ -527,6 +1046,268 @@ class ScreenBreakApp:
             self._mini_win = None
         win.after(4000, dismiss)
         win.bind("<Button-1>", lambda e: dismiss())
+
+    def _start_hydration_reminders(self) -> None:
+        """Start hydration reminder system."""
+        def check_hydration():
+            if not self.config.get("hydration_tracking", False):
+                self.root.after(60000, check_hydration)  # Check again in 1 min
+                return
+            if self.paused or self.idle or self.overlay_up or self.warning_up:
+                self.root.after(60000, check_hydration)
+                return
+            # Check if fullscreen mode should block
+            if self.config.get("focus_mode", False) and self.fullscreen_active:
+                self.root.after(60000, check_hydration)
+                return
+
+            interval = self.config.get("hydration_reminder_interval", 30)
+            elapsed = (datetime.datetime.now() - self.last_hydration_reminder).total_seconds() / 60
+            if elapsed >= interval:
+                self.last_hydration_reminder = datetime.datetime.now()
+                self.root.after(0, self._show_hydration_popup)
+
+            self.root.after(60000, check_hydration)
+
+        self.root.after(60000, check_hydration)
+
+    def _show_hydration_popup(self) -> None:
+        """Show hydration reminder popup with counter."""
+        if self._hydration_win:
+            try:
+                self._hydration_win.destroy()
+            except tk.TclError:
+                pass
+
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        try:
+            win.attributes("-alpha", 0.95)
+        except tk.TclError:
+            pass
+        win.configure(bg=C_CARD)
+
+        # Position bottom-right
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        w, h = 300, 140
+        win.geometry(f"{w}x{h}+{sw-w-20}+{sh-h-60}")
+
+        f = tk.Frame(win, bg=C_CARD, padx=16, pady=12)
+        f.pack(fill="both", expand=True)
+
+        glasses = get_hydration_today(self.stats)
+        goal = self.config.get("hydration_goal", 8)
+
+        tk.Label(f, text="💧 Hydration Reminder", font=(FONT, 12, "bold"),
+                 fg=C_ACCENT2, bg=C_CARD).pack()
+        tk.Label(f, text=f"You've had {glasses}/{goal} glasses today",
+                 font=(FONT, 10), fg=C_TEXT_DIM, bg=C_CARD).pack(pady=(4, 8))
+
+        bf = tk.Frame(f, bg=C_CARD)
+        bf.pack()
+
+        def log_drink():
+            log_hydration(self.stats)
+            save_stats(self.stats)
+            win.destroy()
+            self._hydration_win = None
+
+        def dismiss():
+            win.destroy()
+            self._hydration_win = None
+
+        tk.Button(bf, text="  +1 Glass  ", font=(FONT, 10), bg=C_BTN_PRI, fg=C_TEXT,
+                  relief="flat", padx=12, pady=4, cursor="hand2", command=log_drink).pack(side="left", padx=4)
+        tk.Button(bf, text="Dismiss", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=8, pady=4, cursor="hand2", command=dismiss).pack(side="left")
+
+        self._hydration_win = win
+
+        # Auto-dismiss after 30 seconds
+        win.after(30000, lambda: dismiss() if win.winfo_exists() else None)
+
+    # ── Focus Sessions ─────────────────────────────────────────
+    def _show_focus_session_dialog(self) -> None:
+        """Show dialog to start a new focus session, or close if running."""
+        # If focus session timer is running, close it
+        if hasattr(self, '_focus_win') and self._focus_win:
+            try:
+                if self._focus_win.winfo_exists():
+                    # End the session
+                    if hasattr(self, '_focus_timer_id') and self._focus_timer_id:
+                        try:
+                            self.root.after_cancel(self._focus_timer_id)
+                        except:
+                            pass
+                        self._focus_timer_id = None
+                    self._focus_win.destroy()
+                    self._focus_win = None
+                    return
+            except tk.TclError:
+                self._focus_win = None
+
+        # If dialog is already open, focus it
+        if hasattr(self, '_focus_dialog') and self._focus_dialog:
+            try:
+                if self._focus_dialog.winfo_exists():
+                    self._focus_dialog.lift()
+                    self._focus_dialog.focus_force()
+                    return
+            except tk.TclError:
+                self._focus_dialog = None
+
+        win = tk.Toplevel(self.root)
+        win.title("Start Focus Session")
+        win.geometry("350x180")
+        win.configure(bg=C_BG)
+        win.transient(self._status_win if self._status_win else self.root)
+        self._focus_dialog = win
+
+        def on_close():
+            self._focus_dialog = None
+            win.destroy()
+        win.protocol("WM_DELETE_WINDOW", on_close)
+
+        tk.Label(win, text="🎯 Start Focus Session", font=(FONT, 14, "bold"),
+                 fg=C_ACCENT2, bg=C_BG).pack(pady=(16, 12))
+
+        # Task name input
+        tf = tk.Frame(win, bg=C_BG)
+        tf.pack(fill="x", padx=20)
+        tk.Label(tf, text="What are you working on?", font=(FONT, 10),
+                 fg=C_TEXT_DIM, bg=C_BG).pack(anchor="w")
+        task_entry = tk.Entry(tf, font=(FONT, 11), bg=C_CARD_IN, fg=C_TEXT,
+                              relief="flat", insertbackground=C_TEXT)
+        task_entry.pack(fill="x", pady=(4, 8), ipady=4)
+        task_entry.focus_set()
+
+        # Duration
+        df = tk.Frame(win, bg=C_BG)
+        df.pack(fill="x", padx=20)
+        tk.Label(df, text="Duration:", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
+        dur_spin = tk.Spinbox(df, from_=5, to=120, width=4, font=(MONO, 10),
+                              bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+                              relief="flat", justify="center")
+        dur_spin.pack(side="left", padx=4)
+        dur_spin.delete(0, "end")
+        dur_spin.insert(0, str(self.config.get("focus_session_duration", 25)))
+        tk.Label(df, text="minutes", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+
+        # Buttons
+        bf = tk.Frame(win, bg=C_BG)
+        bf.pack(pady=16)
+
+        def start_session():
+            task = task_entry.get().strip() or "Focus Session"
+            try:
+                duration = int(dur_spin.get())
+            except ValueError:
+                duration = 25
+            self._focus_dialog = None
+            win.destroy()
+            self._start_focus_session(task, duration)
+
+        def cancel():
+            self._focus_dialog = None
+            win.destroy()
+
+        tk.Button(bf, text="  Start  ", font=(FONT, 10, "bold"), bg=C_BTN_PRI, fg=C_TEXT,
+                  relief="flat", padx=16, pady=4, cursor="hand2", command=start_session).pack(side="left", padx=4)
+        tk.Button(bf, text="Cancel", font=(FONT, 10), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=12, pady=4, cursor="hand2", command=cancel).pack(side="left")
+
+        task_entry.bind("<Return>", lambda e: start_session())
+
+    def _start_focus_session(self, task: str, duration: int) -> None:
+        """Start a focus session with the given task name and duration."""
+        self._focus_task = task
+        self._focus_duration = duration
+        self._focus_remaining = duration * 60  # seconds
+
+        # Create floating timer window
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        try:
+            win.attributes("-alpha", 0.92)
+        except tk.TclError:
+            pass
+        win.configure(bg=C_CARD)
+
+        # Position top-right
+        sw = win.winfo_screenwidth()
+        w, h = 260, 90
+        win.geometry(f"{w}x{h}+{sw-w-20}+{20}")
+
+        self._focus_win = win
+
+        f = tk.Frame(win, bg=C_CARD, padx=12, pady=8)
+        f.pack(fill="both", expand=True)
+
+        # Header with task name
+        hf = tk.Frame(f, bg=C_CARD)
+        hf.pack(fill="x")
+        tk.Label(hf, text="🎯", font=(FONT, 12), fg=C_ACCENT2, bg=C_CARD).pack(side="left")
+        task_label = tk.Label(hf, text=task[:25] + ("..." if len(task) > 25 else ""),
+                              font=(FONT, 10, "bold"), fg=C_TEXT, bg=C_CARD)
+        task_label.pack(side="left", padx=(4, 0))
+
+        # Timer
+        self._focus_timer_var = tk.StringVar(value=f"{duration}:00")
+        tk.Label(f, textvariable=self._focus_timer_var, font=(MONO, 28, "bold"),
+                 fg=C_CD, bg=C_CARD).pack()
+
+        # End button
+        def end_session(completed=False):
+            if hasattr(self, '_focus_timer_id') and self._focus_timer_id:
+                try:
+                    self.root.after_cancel(self._focus_timer_id)
+                except:
+                    pass
+            self._focus_timer_id = None
+            if self._focus_win:
+                try:
+                    self._focus_win.destroy()
+                except:
+                    pass
+                self._focus_win = None
+            if completed:
+                # Track and trigger break
+                self.stats["lifetime"]["focus_sessions"] = self.stats["lifetime"].get("focus_sessions", 0) + 1
+                self.stats["today"]["focus_sessions"] = self.stats["today"].get("focus_sessions", 0) + 1
+                save_stats(self.stats)
+                # Show micro-pause as reward
+                self._show_micro()
+
+        tk.Button(f, text="End", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=8, pady=2, cursor="hand2",
+                  command=lambda: end_session(False)).pack()
+
+        # Start countdown
+        def tick():
+            if not self._focus_win or not self._focus_win.winfo_exists():
+                return
+            if self._focus_remaining <= 0:
+                end_session(completed=True)
+                return
+            m, s = divmod(self._focus_remaining, 60)
+            self._focus_timer_var.set(f"{m}:{s:02d}")
+            self._focus_remaining -= 1
+            self._focus_timer_id = self.root.after(1000, tick)
+
+        self._focus_timer_id = self.root.after(1000, tick)
+
+        # Allow dragging
+        def start_drag(e):
+            win._drag_x = e.x
+            win._drag_y = e.y
+        def do_drag(e):
+            x = win.winfo_x() + e.x - win._drag_x
+            y = win.winfo_y() + e.y - win._drag_y
+            win.geometry(f"+{x}+{y}")
+        win.bind("<Button-1>", start_drag)
+        win.bind("<B1-Motion>", do_drag)
 
     def _start_idle_monitor(self) -> None:
         """Start idle detection monitoring."""
@@ -604,8 +1385,16 @@ class ScreenBreakApp:
 
     # ━━━ Scheduling ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     def _tick(self):
+        # Check fullscreen state for focus mode
+        if self.config.get("focus_mode", False):
+            self.fullscreen_active = is_fullscreen_app_active()
+        else:
+            self.fullscreen_active = False
+
+        # Skip break checking if paused, in break, idle, or in fullscreen focus mode
         if not self.paused and not self.overlay_up and not self.warning_up and not self.idle:
-            self._check()
+            if not (self.config.get("focus_mode", False) and self.fullscreen_active):
+                self._check()
         self.root.after(TICK * 1000, self._tick)
 
     def _check(self) -> None:
@@ -683,17 +1472,19 @@ class ScreenBreakApp:
                 return
 
         # ── Priority 2: Micro-pause (skip if scheduled break within coast margin) ──
+        coast_margin = self.config.get("coast_margin_minutes", DEFAULT_COAST_MARGIN)
         el_mp = (now - self.last_micro).total_seconds() / 60
         if el_mp >= self.micro_iv:
-            if not sched_within(COAST_MARGIN_MINUTES):
+            if not sched_within(coast_margin):
                 self._begin_warning(self._show_micro, (), min(30, warn_s))
                 return
 
         # ── Priority 3: Eye rest (skip if scheduled break within coast margin) ──
         el_er = (now - self.last_eye_rest).total_seconds() / 60
         if el_er >= self.eye_iv:
-            # Also skip if micro-pause is due very soon
-            if not sched_within(COAST_MARGIN_MINUTES) and el_mp < (self.micro_iv - COAST_MARGIN_MINUTES):
+            # Also skip if micro-pause is due very soon (but only if coast_margin < micro_iv)
+            micro_soon_threshold = max(0, self.micro_iv - coast_margin)
+            if not sched_within(coast_margin) and (micro_soon_threshold == 0 or el_mp < micro_soon_threshold):
                 self._begin_warning(self._show_eye_rest, (), warn_s)
                 return
 
@@ -857,15 +1648,21 @@ class ScreenBreakApp:
 
         # Play sound notification
         if self.config.get("sound_enabled", True):
-            play_sound("chime")
+            custom = self.config.get("custom_sound_path") if self.config.get("custom_sound_enabled") else None
+            play_sound("chime", custom)
 
         ov = tk.Toplevel(self.root)
         ov.attributes("-topmost", True)
         ov.configure(bg=C_EYE_BG)
 
-        # Fullscreen
-        sw = ov.winfo_screenwidth()
-        sh = ov.winfo_screenheight()
+        # Get monitors for multi-monitor support
+        monitors = get_all_monitors() if self.config.get("multi_monitor_overlay", True) else [(0, 0, None, None)]
+        self._eye_overlays = [ov]  # Track all overlays
+
+        # Primary monitor setup
+        mx, my, mw, mh = monitors[0]
+        sw = mw if mw else ov.winfo_screenwidth()
+        sh = mh if mh else ov.winfo_screenheight()
         ov.geometry(f"{sw}x{sh}+0+0")
         ov.overrideredirect(True)
         if IS_MAC:
@@ -901,17 +1698,33 @@ class ScreenBreakApp:
             ov.after(50, lambda: fade_in(0.0))
 
         tk.Label(cf, text="🌿", font=(FONT, 56), fg=C_EYE_ACC, bg=C_EYE_BG).pack(pady=(0, 16))
-        tk.Label(cf, text="Look away — 20 feet or more", font=(FONT, 28, "bold"),
-                 fg=C_EYE_ACC, bg=C_EYE_BG).pack(pady=(0, 16))
 
-        # Show eye exercise if enabled
-        if self.config.get("show_exercises", True):
-            exercise = get_exercise("eye")
-            hint_text = f"👁 {exercise}"
+        # Guided eye exercise animation
+        self._eye_exercise = None
+        if self.config.get("guided_eye_exercises", False):
+            pattern = random.choice(EYE_EXERCISE_PATTERNS)
+            tk.Label(cf, text=pattern["name"], font=(FONT, 28, "bold"),
+                     fg=C_EYE_ACC, bg=C_EYE_BG).pack(pady=(0, 8))
+            tk.Label(cf, text=pattern["instruction"], font=(FONT, 14), fg=C_TEXT_DIM,
+                     bg=C_EYE_BG).pack(pady=(0, 16))
+
+            # Canvas for animated dot - large for proper eye tracking
+            eye_canvas = tk.Canvas(cf, width=700, height=500, bg=C_EYE_BG, highlightthickness=0)
+            eye_canvas.pack(pady=(0, 20))
+            self._eye_exercise = GuidedEyeExercise(eye_canvas, 700, 500, pattern["pattern"])
+            self._eye_exercise.start()
         else:
-            hint_text = "Rest your eyes on something distant.\nBlink slowly. Let your focus soften."
-        tk.Label(cf, text=hint_text, font=(FONT, 14), fg=C_TEXT_DIM, bg=C_EYE_BG,
-                 justify="center", wraplength=600).pack(pady=(0, 30))
+            tk.Label(cf, text="Look away — 20 feet or more", font=(FONT, 28, "bold"),
+                     fg=C_EYE_ACC, bg=C_EYE_BG).pack(pady=(0, 16))
+
+            # Show eye exercise text if enabled
+            if self.config.get("show_exercises", True):
+                exercise = get_exercise("eye")
+                hint_text = f"👁 {exercise}"
+            else:
+                hint_text = "Rest your eyes on something distant.\nBlink slowly. Let your focus soften."
+            tk.Label(cf, text=hint_text, font=(FONT, 14), fg=C_TEXT_DIM, bg=C_EYE_BG,
+                     justify="center", wraplength=600).pack(pady=(0, 30))
 
         # Countdown / button container
         self._eye_cd_frame = tk.Frame(cf, bg=C_EYE_BG)
@@ -952,6 +1765,10 @@ class ScreenBreakApp:
         ov.after(1000, lambda: self._eye_countdown(ov, rem - 1))
 
     def _close_eye_rest(self, ov, completed: bool = False):
+        # Stop eye exercise animation if running
+        if self._eye_exercise:
+            self._eye_exercise.stop()
+            self._eye_exercise = None
         # Eye rest only resets eye timer and 20-min gap
         # Does NOT reset micro-pause — looking away isn't the same as standing up
         now = datetime.datetime.now()
@@ -974,11 +1791,17 @@ class ScreenBreakApp:
 
         # Play sound notification
         if self.config.get("sound_enabled", True):
-            play_sound("chime")
+            custom = self.config.get("custom_sound_path") if self.config.get("custom_sound_enabled") else None
+            play_sound("chime", custom)
+
+        # Determine if we need extra height for animations
+        has_breathing = self.config.get("breathing_exercises", False)
+        has_desk = self.config.get("desk_exercises", False)
+        win_height = 380 + (120 if has_breathing else 0) + (100 if has_desk else 0)
 
         ov = tk.Toplevel(self.root)
         ov.overrideredirect(True);  ov.attributes("-topmost", True)
-        ov.configure(bg=C_BG);  self._centre(ov, 500, 380)
+        ov.configure(bg=C_BG);  self._centre(ov, 500, win_height)
         if IS_MAC: ov.lift()
 
         card = tk.Frame(ov, bg=C_CARD, padx=32, pady=22)
@@ -1000,8 +1823,48 @@ class ScreenBreakApp:
                     "Walk to the window or refill water.\n5 min — your work will be here.")
         tk.Label(card, text=body, font=(FONT, 10), fg=C_TEXT_DIM, bg=C_CARD,
                  justify="center", wraplength=420).pack(pady=(0, 8))
+
+        # Breathing exercise animation
+        self._breathing_exercise = None
+        if has_breathing:
+            breath_frame = tk.Frame(card, bg=C_CARD)
+            breath_frame.pack(pady=(8, 8))
+
+            pattern = random.choice(list(BREATHING_PATTERNS.keys()))
+            tk.Label(breath_frame, text=BREATHING_PATTERNS[pattern]["name"],
+                     font=(FONT, 10, "bold"), fg=C_ACCENT2, bg=C_CARD).pack()
+
+            breath_canvas = tk.Canvas(breath_frame, width=120, height=80, bg=C_CARD, highlightthickness=0)
+            breath_canvas.pack()
+
+            breath_label = tk.Label(breath_frame, text="", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_CARD)
+            breath_label.pack()
+
+            self._breathing_exercise = BreathingExercise(breath_canvas, breath_label, 120, 80, pattern)
+            self._breathing_exercise.start()
+
+        # Desk exercise animation
+        self._desk_exercise = None
+        if has_desk:
+            desk_frame = tk.Frame(card, bg=C_CARD)
+            desk_frame.pack(pady=(8, 8))
+
+            exercise_data = random.choice(DESK_EXERCISES)
+            tk.Label(desk_frame, text=exercise_data["name"],
+                     font=(FONT, 10, "bold"), fg=C_ACCENT2, bg=C_CARD).pack()
+
+            desk_label = tk.Label(desk_frame, text=exercise_data["frames"][0],
+                                  font=(MONO, 12), fg=C_TEXT_DIM, bg=C_CARD)
+            desk_label.pack()
+
+            tk.Label(desk_frame, text=exercise_data["instruction"],
+                     font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD).pack()
+
+            self._desk_exercise = DeskExerciseAnimation(desk_label, exercise_data)
+            self._desk_exercise.start()
+
         tk.Label(card, text=datetime.datetime.now().strftime("%I:%M %p").lstrip("0"),
-                 font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD).pack(pady=(0, 6))
+                 font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD).pack(pady=(6, 6))
 
         # Countdown timer (5 minutes)
         self._micro_cd_var = tk.StringVar(value="5:00")
@@ -1012,6 +1875,11 @@ class ScreenBreakApp:
         sm = self.config.get("snooze_minutes", 5)
 
         def back_from_break():
+            # Stop animations
+            if self._breathing_exercise:
+                self._breathing_exercise.stop()
+            if self._desk_exercise:
+                self._desk_exercise.stop()
             # Track statistics
             self.stats["lifetime"]["micro_taken"] = self.stats["lifetime"].get("micro_taken", 0) + 1
             self.stats["today"]["micro_taken"] = self.stats["today"].get("micro_taken", 0) + 1
@@ -1023,6 +1891,11 @@ class ScreenBreakApp:
             self._dismiss(ov)
 
         def skip_break():
+            # Stop animations
+            if self._breathing_exercise:
+                self._breathing_exercise.stop()
+            if self._desk_exercise:
+                self._desk_exercise.stop()
             self.stats["lifetime"]["micro_skipped"] = self.stats["lifetime"].get("micro_skipped", 0) + 1
             save_stats(self.stats)
             self._reset_all_timers()
@@ -1060,7 +1933,8 @@ class ScreenBreakApp:
 
         # Play sound notification
         if self.config.get("sound_enabled", True):
-            play_sound("chime")
+            custom = self.config.get("custom_sound_path") if self.config.get("custom_sound_enabled") else None
+            play_sound("chime", custom)
 
         ov = tk.Toplevel(self.root)
         ov.overrideredirect(True);  ov.attributes("-topmost", True)
@@ -1149,10 +2023,15 @@ class ScreenBreakApp:
         return []
 
     def _show_notes_win(self) -> None:
+        if hasattr(self, '_notes_win') and self._notes_win:
+            try: self._notes_win.lift();  self._notes_win.focus_force();  return
+            except tk.TclError: self._notes_win = None
+
         win = tk.Toplevel(self.root)
         win.title("Screen Break — Notes")
         win.geometry("580x450")
         win.configure(bg=C_BG)
+        self._notes_win = win
 
         tk.Label(win, text="Saved Notes", font=(FONT, 15, "bold"),
                  fg=C_ACCENT2, bg=C_BG).pack(pady=(14, 8))
@@ -1249,7 +2128,7 @@ class ScreenBreakApp:
 
         win = tk.Toplevel(self.root)
         win.title("Screen Break — Statistics")
-        win.geometry("400x480")
+        win.geometry("400x580")
         win.configure(bg=C_BG)
         self._stats_win = win
 
@@ -1278,8 +2157,79 @@ class ScreenBreakApp:
         streak_emoji = "🔥" if streak >= 7 else "⭐" if streak >= 3 else "📊"
         tk.Label(sf, text=f"{streak_emoji}  Current Streak: {streak} day{'s' if streak != 1 else ''}",
                  font=(FONT, 12, "bold"), fg=C_CD if streak >= 3 else C_TEXT, bg=C_CARD).pack(anchor="w")
-        tk.Label(sf, text="Take at least one break each day to maintain your streak!",
+        tk.Label(sf, text="Days with at least one break taken",
                  font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD).pack(anchor="w", pady=(2, 0))
+
+        # Weekly chart
+        cf = tk.Frame(win, bg=C_CARD, padx=16, pady=12)
+        cf.pack(fill="x", padx=14, pady=(0, 8))
+        tk.Label(cf, text="📊  Last 7 Days", font=(FONT, 12, "bold"),
+                 fg=C_TEXT, bg=C_CARD).pack(anchor="w")
+
+        # Build chart data - include today + history
+        chart_data = []
+        history = self.stats.get("daily_history", [])
+        for entry in history[-6:]:  # Last 6 days from history
+            chart_data.append(entry)
+        # Add today
+        today_entry = {
+            "date": datetime.date.today().isoformat(),
+            "eye": today.get("eye_rest_taken", 0),
+            "micro": today.get("micro_taken", 0),
+            "scheduled": today.get("scheduled_taken", 0),
+        }
+        chart_data.append(today_entry)
+
+        # Pad to 7 days if needed
+        while len(chart_data) < 7:
+            chart_data.insert(0, {"date": "", "eye": 0, "micro": 0, "scheduled": 0})
+
+        # Draw bar chart
+        canvas = tk.Canvas(cf, width=340, height=100, bg=C_CARD, highlightthickness=0)
+        canvas.pack(pady=(8, 4))
+
+        bar_width = 35
+        gap = 12
+        max_val = max(1, max(d["eye"] + d["micro"] + d["scheduled"] for d in chart_data))
+        scale = 70 / max_val
+
+        for i, day in enumerate(chart_data):
+            x = 15 + i * (bar_width + gap)
+            total = day["eye"] + day["micro"] + day["scheduled"]
+
+            # Stacked bars
+            y = 85
+            if day["eye"] > 0:
+                h = day["eye"] * scale
+                canvas.create_rectangle(x, y - h, x + bar_width, y, fill=C_EYE_ACC, outline="")
+                y -= h
+            if day["micro"] > 0:
+                h = day["micro"] * scale
+                canvas.create_rectangle(x, y - h, x + bar_width, y, fill=C_ACCENT, outline="")
+                y -= h
+            if day["scheduled"] > 0:
+                h = day["scheduled"] * scale
+                canvas.create_rectangle(x, y - h, x + bar_width, y, fill=C_ACCENT2, outline="")
+
+            # Day label
+            if day["date"]:
+                try:
+                    d = datetime.date.fromisoformat(day["date"])
+                    label = d.strftime("%a")[:2]
+                except ValueError:
+                    label = ""
+            else:
+                label = ""
+            canvas.create_text(x + bar_width // 2, 95, text=label, font=(FONT, 8), fill=C_TEXT_MUT)
+
+        # Legend
+        legend_frame = tk.Frame(cf, bg=C_CARD)
+        legend_frame.pack(anchor="w")
+        for color, label in [(C_EYE_ACC, "Eye"), (C_ACCENT, "Micro"), (C_ACCENT2, "Sched")]:
+            lf = tk.Frame(legend_frame, bg=C_CARD)
+            lf.pack(side="left", padx=(0, 12))
+            tk.Canvas(lf, width=10, height=10, bg=color, highlightthickness=0).pack(side="left", padx=(0, 4))
+            tk.Label(lf, text=label, font=(FONT, 8), fg=C_TEXT_MUT, bg=C_CARD).pack(side="left")
 
         # Lifetime stats
         lf = tk.Frame(win, bg=C_CARD, padx=16, pady=12)
@@ -1287,20 +2237,16 @@ class ScreenBreakApp:
         tk.Label(lf, text="📈  Lifetime", font=(FONT, 12, "bold"),
                  fg=C_TEXT, bg=C_CARD).pack(anchor="w")
         lt = self.stats.get("lifetime", {})
-        lt_text = (f"Eye rests: {lt.get('eye_rest_taken', 0)} taken, {lt.get('eye_rest_skipped', 0)} skipped\n"
-                   f"Micro-pauses: {lt.get('micro_taken', 0)} taken, {lt.get('micro_skipped', 0)} skipped\n"
-                   f"Scheduled breaks: {lt.get('scheduled_taken', 0)} taken, {lt.get('scheduled_skipped', 0)} skipped")
+        lt_text = (f"Eye rests completed: {lt.get('eye_rest_taken', 0)}\n"
+                   f"Micro-pauses completed: {lt.get('micro_taken', 0)}\n"
+                   f"Scheduled breaks completed: {lt.get('scheduled_taken', 0)}")
         tk.Label(lf, text=lt_text, font=(FONT, 10), fg=C_TEXT_DIM,
                  bg=C_CARD, justify="left").pack(anchor="w", pady=(4, 0))
 
-        # Completion rate
+        # Total breaks - cumulative progress
         total_taken = (lt.get('eye_rest_taken', 0) + lt.get('micro_taken', 0) + lt.get('scheduled_taken', 0))
-        total_skipped = (lt.get('eye_rest_skipped', 0) + lt.get('micro_skipped', 0) + lt.get('scheduled_skipped', 0))
-        total = total_taken + total_skipped
-        rate = (total_taken / total * 100) if total > 0 else 0
-        rate_color = C_OK if rate >= 80 else C_CD if rate >= 50 else C_ACCENT
-        tk.Label(lf, text=f"Completion rate: {rate:.0f}%", font=(FONT, 11, "bold"),
-                 fg=rate_color, bg=C_CARD).pack(anchor="w", pady=(8, 0))
+        tk.Label(lf, text=f"Total breaks: {total_taken}", font=(FONT, 11, "bold"),
+                 fg=C_OK, bg=C_CARD).pack(anchor="w", pady=(8, 0))
 
         # Buttons
         bf = tk.Frame(win, bg=C_BG)
@@ -1355,10 +2301,41 @@ class ScreenBreakApp:
 
         pad = dict(padx=20)
 
-        # ══════ LIVE COUNTDOWNS ══════
-        tk.Label(win, text="Live Countdowns", font=(FONT, 13, "bold"),
-                 fg=C_ACCENT2, bg=C_BG).pack(pady=(14, 8), **pad, anchor="w")
+        # ══════ CONTROL BUTTONS ══════
+        ctrl_frame = tk.Frame(win, bg=C_BG)
+        ctrl_frame.pack(fill="x", pady=(14, 8), **pad)
 
+        self._pause_btn = tk.Button(ctrl_frame, text="⏸ Pause", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT,
+                  relief="flat", width=9, pady=4, cursor="hand2", command=self._toggle_pause_ui)
+        self._pause_btn.pack(side="left", padx=(0, 6))
+        ToolTip(self._pause_btn, "Pause all break reminders")
+
+        self._gentle_btn = tk.Button(ctrl_frame, text="🪫 Gentle", font=(FONT, 9),
+                  bg=C_BTN_SEC, fg=C_TEXT_DIM, relief="flat", width=9, pady=4, cursor="hand2",
+                  command=self._toggle_gentle_ui)
+        self._gentle_btn.pack(side="left", padx=(0, 6))
+        self._update_gentle_btn()
+        ToolTip(self._gentle_btn, "Gentler reminders (1.5x longer intervals)")
+
+        stats_btn = tk.Button(ctrl_frame, text="📊 Stats", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=10, pady=4, cursor="hand2",
+                  command=self._toggle_stats_win)
+        stats_btn.pack(side="left", padx=(0, 6))
+        ToolTip(stats_btn, "View break statistics and streaks")
+
+        notes_btn = tk.Button(ctrl_frame, text="📝 Notes", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=10, pady=4, cursor="hand2",
+                  command=self._toggle_notes_win)
+        notes_btn.pack(side="left", padx=(0, 6))
+        ToolTip(notes_btn, "View notes captured during breaks")
+
+        focus_btn = tk.Button(ctrl_frame, text="🎯 Focus", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=10, pady=4, cursor="hand2",
+                  command=self._show_focus_session_dialog)
+        focus_btn.pack(side="left")
+        ToolTip(focus_btn, "Start a timed focus session")
+
+        # ══════ COUNTDOWNS (FIXED TOP) ══════
         self._st_rows = {}
         for key, icon in [("eye", "🌿  Eye rest"), ("micro", "🧘  Micro-pause"), ("sched", "📋  Next break")]:
             lf = tk.Frame(win, bg=C_CARD, padx=14, pady=8);  lf.pack(fill="x", pady=2, **pad)
@@ -1369,17 +2346,93 @@ class ScreenBreakApp:
             tk.Label(lf, textvariable=dv, font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD, anchor="w").pack(fill="x")
             self._st_rows[key] = (tv, dv)
 
-        # ══════ SETTINGS ══════
-        tk.Frame(win, bg=C_TEXT_MUT, height=1).pack(fill="x", pady=(14, 6), **pad)
-        tk.Label(win, text="Settings", font=(FONT, 13, "bold"),
-                 fg=C_ACCENT2, bg=C_BG).pack(pady=(0, 8), **pad, anchor="w")
+        # ══════ COLLAPSIBLE SETTINGS SECTION ══════
+        self._settings_expanded = tk.BooleanVar(value=True)
+        settings_header = tk.Frame(win, bg=C_BG)
+        settings_header.pack(fill="x", **pad)
 
-        # ── Intervals ──
-        ivf = tk.Frame(win, bg=C_BG);  ivf.pack(fill="x", **pad)
+        # Container for all settings content
+        self._settings_container = tk.Frame(win, bg=C_BG)
+
+        def toggle_settings():
+            if self._settings_expanded.get():
+                self._settings_container.pack(fill="both", expand=True, after=settings_header)
+                self._settings_btn_frame.pack(side="right")
+                settings_toggle_btn.config(text="▼ Settings")
+                # Expand window to show settings
+                win.update_idletasks()
+                win.geometry("")  # Reset to natural size
+            else:
+                self._settings_container.pack_forget()
+                self._settings_btn_frame.pack_forget()
+                settings_toggle_btn.config(text="▶ Settings")
+                # Shrink window to compact size
+                win.update_idletasks()
+                win.geometry("")  # Reset to natural size
+
+        settings_toggle_btn = tk.Button(settings_header, text="▼ Settings", font=(FONT, 13, "bold"),
+                            fg=C_ACCENT2, bg=C_BG, relief="flat", cursor="hand2",
+                            command=lambda: [self._settings_expanded.set(not self._settings_expanded.get()), toggle_settings()])
+        settings_toggle_btn.pack(side="left")
+
+        # Buttons on same row as Settings toggle (inside header so they hide with settings)
+        self._settings_btn_frame = tk.Frame(settings_header, bg=C_BG)
+        self._settings_btn_frame.pack(side="right")
+
+        self._save_fb = tk.StringVar()
+        tk.Label(self._settings_btn_frame, textvariable=self._save_fb, font=(FONT, 8), fg=C_OK, bg=C_BG).pack(side="left", padx=(0, 8))
+        tk.Button(self._settings_btn_frame, text="Apply & Save", font=(FONT, 9), bg=C_BTN_PRI, fg=C_TEXT,
+                  relief="flat", padx=10, pady=2, cursor="hand2",
+                  command=self._apply_settings).pack(side="left")
+        tk.Button(self._settings_btn_frame, text="Reset", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=8, pady=2, cursor="hand2",
+                  command=self._reset_defaults).pack(side="left", padx=(6, 0))
+
+        # Show settings container initially
+        self._settings_container.pack(fill="both", expand=True)
+
+        # ══════ SCROLLABLE SETTINGS AREA ══════
+        scroll_container = tk.Frame(self._settings_container, bg=C_BG)
+        scroll_container.pack(fill="both", expand=True, pady=(6, 0))
+
+        canvas = tk.Canvas(scroll_container, bg=C_BG, highlightthickness=0, height=320)
+        scrollbar = tk.Scrollbar(scroll_container, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+
+        scroll_frame = tk.Frame(canvas, bg=C_BG)
+        canvas_window = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+
+        # Mousewheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        def _on_enter(event):
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        def _on_leave(event):
+            canvas.unbind_all("<MouseWheel>")
+        canvas.bind("<Enter>", _on_enter)
+        canvas.bind("<Leave>", _on_leave)
+
+        # Update scroll region when content changes
+        def _configure_scroll(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            canvas.itemconfig(canvas_window, width=event.width)
+        scroll_frame.bind("<Configure>", _configure_scroll)
+        canvas.bind("<Configure>", lambda e: canvas.itemconfig(canvas_window, width=e.width))
+
+        spad = dict(padx=20)  # Padding inside scroll area
+
+        # ══════ INTERVALS & TIMING ══════
+        tk.Label(scroll_frame, text="Intervals & Timing", font=(FONT, 11, "bold"),
+                 fg=C_TEXT_DIM, bg=C_BG).pack(pady=(4, 6), **spad, anchor="w")
+
+        ivf = tk.Frame(scroll_frame, bg=C_BG);  ivf.pack(fill="x", **spad)
 
         ef = tk.Frame(ivf, bg=C_BG);  ef.pack(fill="x", pady=2)
         tk.Label(ef, text="Eye rest every", font=(FONT, 10), fg=C_TEXT_DIM,
-                 bg=C_BG, width=18, anchor="w").pack(side="left")
+                 bg=C_BG, width=22, anchor="w").pack(side="left")
         self._eye_spin = tk.Spinbox(ef, from_=5, to=120, width=4,
             font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
@@ -1389,7 +2442,7 @@ class ScreenBreakApp:
 
         mf = tk.Frame(ivf, bg=C_BG);  mf.pack(fill="x", pady=2)
         tk.Label(mf, text="Micro-pause every", font=(FONT, 10), fg=C_TEXT_DIM,
-                 bg=C_BG, width=18, anchor="w").pack(side="left")
+                 bg=C_BG, width=22, anchor="w").pack(side="left")
         self._micro_spin = tk.Spinbox(mf, from_=10, to=120, width=4,
             font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
@@ -1397,10 +2450,9 @@ class ScreenBreakApp:
         self._micro_spin.insert(0, str(self.config.get("micro_pause_interval", 45)))
         tk.Label(mf, text=" min", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
 
-        # ── Additional settings ──
         gf = tk.Frame(ivf, bg=C_BG);  gf.pack(fill="x", pady=2)
         tk.Label(gf, text="Min gap between breaks", font=(FONT, 10), fg=C_TEXT_DIM,
-                 bg=C_BG, width=18, anchor="w").pack(side="left")
+                 bg=C_BG, width=22, anchor="w").pack(side="left")
         self._gap_spin = tk.Spinbox(gf, from_=0, to=60, width=4,
             font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
@@ -1410,7 +2462,7 @@ class ScreenBreakApp:
 
         edf = tk.Frame(ivf, bg=C_BG);  edf.pack(fill="x", pady=2)
         tk.Label(edf, text="Eye rest duration", font=(FONT, 10), fg=C_TEXT_DIM,
-                 bg=C_BG, width=18, anchor="w").pack(side="left")
+                 bg=C_BG, width=22, anchor="w").pack(side="left")
         self._eye_dur_spin = tk.Spinbox(edf, from_=5, to=60, width=4,
             font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
@@ -1420,7 +2472,7 @@ class ScreenBreakApp:
 
         sf = tk.Frame(ivf, bg=C_BG);  sf.pack(fill="x", pady=2)
         tk.Label(sf, text="Snooze duration", font=(FONT, 10), fg=C_TEXT_DIM,
-                 bg=C_BG, width=18, anchor="w").pack(side="left")
+                 bg=C_BG, width=22, anchor="w").pack(side="left")
         self._snooze_spin = tk.Spinbox(sf, from_=1, to=30, width=4,
             font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
@@ -1430,7 +2482,7 @@ class ScreenBreakApp:
 
         warnf = tk.Frame(ivf, bg=C_BG);  warnf.pack(fill="x", pady=2)
         tk.Label(warnf, text="Warning before break", font=(FONT, 10), fg=C_TEXT_DIM,
-                 bg=C_BG, width=18, anchor="w").pack(side="left")
+                 bg=C_BG, width=22, anchor="w").pack(side="left")
         self._warn_spin = tk.Spinbox(warnf, from_=10, to=300, width=4,
             font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
@@ -1438,10 +2490,9 @@ class ScreenBreakApp:
         self._warn_spin.insert(0, str(self.config.get("warning_seconds", 60)))
         tk.Label(warnf, text=" sec", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
 
-        # ── Work hours ──
         wf = tk.Frame(ivf, bg=C_BG);  wf.pack(fill="x", pady=2)
         tk.Label(wf, text="Work hours", font=(FONT, 10), fg=C_TEXT_DIM,
-                 bg=C_BG, width=18, anchor="w").pack(side="left")
+                 bg=C_BG, width=22, anchor="w").pack(side="left")
         self._ws_entry = tk.Entry(wf, width=6, font=(MONO, 10), bg=C_CARD_IN,
                                   fg=C_TEXT, relief="flat", justify="center")
         self._ws_entry.pack(side="left");  self._ws_entry.insert(0, self.config.get("work_start", "08:00"))
@@ -1450,12 +2501,51 @@ class ScreenBreakApp:
                                   fg=C_TEXT, relief="flat", justify="center")
         self._we_entry.pack(side="left");  self._we_entry.insert(0, self.config.get("work_end", "20:00"))
 
-        # ── Features ──
-        tk.Frame(win, bg=C_TEXT_MUT, height=1).pack(fill="x", pady=(10, 6), **pad)
-        tk.Label(win, text="Features", font=(FONT, 11, "bold"),
-                 fg=C_TEXT_DIM, bg=C_BG).pack(pady=(0, 4), **pad, anchor="w")
+        # Coast margin setting
+        coastf = tk.Frame(ivf, bg=C_BG);  coastf.pack(fill="x", pady=2)
+        tk.Label(coastf, text="Skip if scheduled within", font=(FONT, 10), fg=C_TEXT_DIM,
+                 bg=C_BG, width=22, anchor="w").pack(side="left")
+        self._coast_spin = tk.Spinbox(coastf, from_=0, to=30, width=3,
+            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+            relief="flat", justify="center")
+        self._coast_spin.pack(side="left");  self._coast_spin.delete(0, "end")
+        self._coast_spin.insert(0, str(self.config.get("coast_margin_minutes", 10)))
+        tk.Label(coastf, text=" min", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
 
-        featf = tk.Frame(win, bg=C_BG);  featf.pack(fill="x", **pad)
+        # ══════ SCHEDULED BREAKS ══════
+        tk.Frame(scroll_frame, bg=C_TEXT_MUT, height=1).pack(fill="x", pady=(10, 6), **spad)
+        tk.Label(scroll_frame, text="Scheduled Breaks  (local time)", font=(FONT, 11, "bold"),
+                 fg=C_TEXT_DIM, bg=C_BG).pack(pady=(0, 4), **spad, anchor="w")
+
+        hdr = tk.Frame(scroll_frame, bg=C_BG);  hdr.pack(fill="x", **spad)
+        tk.Label(hdr, text="Time", font=(FONT, 9), fg=C_TEXT_MUT, bg=C_BG, width=7, anchor="w").pack(side="left")
+        tk.Label(hdr, text="Dur", font=(FONT, 9), fg=C_TEXT_MUT, bg=C_BG, width=5, anchor="w").pack(side="left")
+        tk.Label(hdr, text="Name", font=(FONT, 9), fg=C_TEXT_MUT, bg=C_BG, anchor="w").pack(side="left", fill="x", expand=True)
+
+        self._brk_container = tk.Frame(scroll_frame, bg=C_BG)
+        self._brk_container.pack(fill="x", **spad)
+        self._brk_rows = []
+        for brk in self.config.get("breaks", []):
+            self._add_brk_row(brk["time"], brk["duration"], brk["title"])
+
+        tk.Button(scroll_frame, text="+ Add break", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=10, pady=2, cursor="hand2",
+                  command=lambda: self._add_brk_row("12:00", 15, "New Break")).pack(
+                      pady=(4, 8), **spad, anchor="w")
+
+        # ══════ FEATURES ══════
+        tk.Frame(scroll_frame, bg=C_TEXT_MUT, height=1).pack(fill="x", pady=(6, 6), **spad)
+        tk.Label(scroll_frame, text="Features", font=(FONT, 11, "bold"),
+                 fg=C_TEXT_DIM, bg=C_BG).pack(pady=(0, 4), **spad, anchor="w")
+
+        featf = tk.Frame(scroll_frame, bg=C_BG);  featf.pack(fill="x", **spad)
+
+        # Presentation mode (focus_mode) - auto-pause during fullscreen/Zoom
+        focf = tk.Frame(featf, bg=C_BG);  focf.pack(fill="x", pady=2)
+        self._focus_var = tk.BooleanVar(value=self.config.get("focus_mode", True))
+        tk.Checkbutton(focf, text="Presentation mode (auto-pause during fullscreen/Zoom)", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._focus_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
 
         # Idle detection checkbox and threshold
         idf = tk.Frame(featf, bg=C_BG);  idf.pack(fill="x", pady=2)
@@ -1487,7 +2577,7 @@ class ScreenBreakApp:
         # Strict mode checkbox
         strf = tk.Frame(featf, bg=C_BG);  strf.pack(fill="x", pady=2)
         self._strict_var = tk.BooleanVar(value=self.config.get("strict_mode", False))
-        tk.Checkbutton(strf, text="Strict mode (can't skip breaks, only snooze)", font=(FONT, 10), fg=C_TEXT_DIM,
+        tk.Checkbutton(strf, text="Strict mode (snooze option only)", font=(FONT, 10), fg=C_TEXT_DIM,
                        bg=C_BG, variable=self._strict_var, selectcolor=C_CARD_IN,
                        activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
 
@@ -1518,46 +2608,104 @@ class ScreenBreakApp:
         self._mini_spin.insert(0, str(self.config.get("mini_reminder_interval", 10)))
         tk.Label(minif, text=" min", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
 
-        # ── Scheduled Breaks ──
-        tk.Frame(win, bg=C_TEXT_MUT, height=1).pack(fill="x", pady=(10, 6), **pad)
-        tk.Label(win, text="Scheduled Breaks  (local time)", font=(FONT, 11, "bold"),
-                 fg=C_TEXT_DIM, bg=C_BG).pack(pady=(0, 4), **pad, anchor="w")
+        # Multi-monitor
+        mmf = tk.Frame(featf, bg=C_BG);  mmf.pack(fill="x", pady=2)
+        self._multimon_var = tk.BooleanVar(value=self.config.get("multi_monitor_overlay", True))
+        tk.Checkbutton(mmf, text="Show overlay on all monitors", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._multimon_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
 
-        hdr = tk.Frame(win, bg=C_BG);  hdr.pack(fill="x", **pad)
-        tk.Label(hdr, text="Time", font=(FONT, 9), fg=C_TEXT_MUT, bg=C_BG, width=7, anchor="w").pack(side="left")
-        tk.Label(hdr, text="Dur", font=(FONT, 9), fg=C_TEXT_MUT, bg=C_BG, width=5, anchor="w").pack(side="left")
-        tk.Label(hdr, text="Name", font=(FONT, 9), fg=C_TEXT_MUT, bg=C_BG, anchor="w").pack(side="left", fill="x", expand=True)
+        # Theme selection (applies instantly)
+        themef = tk.Frame(featf, bg=C_BG);  themef.pack(fill="x", pady=2)
+        tk.Label(themef, text="Theme:", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
+        self._theme_var = tk.StringVar(value=self.config.get("theme", "dark"))
 
-        self._brk_container = tk.Frame(win, bg=C_BG)
-        self._brk_container.pack(fill="x", **pad)
-        self._brk_rows = []
-        for brk in self.config.get("breaks", []):
-            self._add_brk_row(brk["time"], brk["duration"], brk["title"])
+        def apply_theme_now():
+            theme = self._theme_var.get()
+            apply_theme(theme)
+            self.config["theme"] = theme
+            save_config(self.config)
+            # Reopen window to show new colors
+            if self._status_win:
+                self._status_win.destroy()
+                self._status_win = None
+                self.root.after(100, self._show_status_window)
 
-        tk.Button(win, text="+ Add break", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
-                  relief="flat", padx=10, pady=2, cursor="hand2",
-                  command=lambda: self._add_brk_row("12:00", 15, "New Break")).pack(
-                      pady=(4, 0), **pad, anchor="w")
+        for theme_name in ["dark", "light", "nord"]:
+            tk.Radiobutton(themef, text=theme_name.capitalize(), variable=self._theme_var, value=theme_name,
+                          font=(FONT, 9), fg=C_TEXT_DIM, bg=C_BG, selectcolor=C_CARD_IN,
+                          activebackground=C_BG, activeforeground=C_TEXT_DIM,
+                          command=apply_theme_now).pack(side="left", padx=4)
 
-        # ── Controls ──
-        tk.Frame(win, bg=C_TEXT_MUT, height=1).pack(fill="x", pady=(10, 6), **pad)
-        self._save_fb = tk.StringVar()
-        tk.Label(win, textvariable=self._save_fb, font=(FONT, 9), fg=C_OK, bg=C_BG).pack(**pad, anchor="w")
+        # Hydration tracking
+        hydf = tk.Frame(featf, bg=C_BG);  hydf.pack(fill="x", pady=2)
+        self._hydration_var = tk.BooleanVar(value=self.config.get("hydration_tracking", False))
+        tk.Checkbutton(hydf, text="Hydration reminders every", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._hydration_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
+        self._hydration_spin = tk.Spinbox(hydf, from_=15, to=120, width=3,
+            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+            relief="flat", justify="center")
+        self._hydration_spin.pack(side="left");  self._hydration_spin.delete(0, "end")
+        self._hydration_spin.insert(0, str(self.config.get("hydration_reminder_interval", 30)))
+        tk.Label(hydf, text=" min, goal:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+        self._hydration_goal_spin = tk.Spinbox(hydf, from_=1, to=20, width=2,
+            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+            relief="flat", justify="center")
+        self._hydration_goal_spin.pack(side="left");  self._hydration_goal_spin.delete(0, "end")
+        self._hydration_goal_spin.insert(0, str(self.config.get("hydration_goal", 8)))
+        tk.Label(hydf, text=" glasses", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
 
-        bf = tk.Frame(win, bg=C_BG);  bf.pack(fill="x", pady=(0, 4), **pad)
-        tk.Button(bf, text="Apply & Save", font=(FONT, 10, "bold"), bg=C_BTN_PRI, fg=C_TEXT,
-                  relief="flat", padx=16, pady=5, cursor="hand2",
-                  command=self._apply_settings).pack(side="left")
-        tk.Button(bf, text="Reset defaults", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
-                  relief="flat", padx=12, pady=5, cursor="hand2",
-                  command=self._reset_defaults).pack(side="left", padx=(8, 0))
-        tk.Button(bf, text="Close", font=(FONT, 10), bg=C_BTN_SEC, fg=C_TEXT,
-                  relief="flat", padx=16, pady=5, cursor="hand2",
-                  command=self._close_status).pack(side="right")
+        # Custom sound
+        csf = tk.Frame(featf, bg=C_BG);  csf.pack(fill="x", pady=2)
+        self._custom_sound_var = tk.BooleanVar(value=self.config.get("custom_sound_enabled", False))
+        tk.Checkbutton(csf, text="Custom sound:", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._custom_sound_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
+        self._sound_path_entry = tk.Entry(csf, width=25, font=(FONT, 9), bg=C_CARD_IN,
+                                          fg=C_TEXT, relief="flat")
+        self._sound_path_entry.pack(side="left", padx=2)
+        self._sound_path_entry.insert(0, self.config.get("custom_sound_path", ""))
 
-        self._st_state = tk.StringVar()
-        tk.Label(win, textvariable=self._st_state, font=(FONT, 9),
-                 fg=C_TEXT_MUT, bg=C_BG).pack(pady=(0, 10), **pad, anchor="w")
+        def browse_sound():
+            from tkinter import filedialog
+            path = filedialog.askopenfilename(filetypes=[("Audio", "*.mp3 *.wav *.ogg *.m4a"), ("All", "*.*")])
+            if path:
+                self._sound_path_entry.delete(0, "end")
+                self._sound_path_entry.insert(0, path)
+
+        tk.Button(csf, text="...", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=4, cursor="hand2", command=browse_sound).pack(side="left")
+
+        # Custom messages
+        cmf = tk.Frame(featf, bg=C_BG);  cmf.pack(fill="x", pady=2)
+        self._custom_msg_var = tk.BooleanVar(value=self.config.get("use_custom_messages", False))
+        tk.Checkbutton(cmf, text="Use custom break messages", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._custom_msg_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
+        tk.Button(cmf, text="Edit...", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=6, cursor="hand2", command=self._show_message_editor).pack(side="left", padx=4)
+
+        # Guided eye exercises
+        eyef = tk.Frame(featf, bg=C_BG);  eyef.pack(fill="x", pady=2)
+        self._guided_eye_var = tk.BooleanVar(value=self.config.get("guided_eye_exercises", False))
+        tk.Checkbutton(eyef, text="Guided eye exercise routines", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._guided_eye_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
+
+        # Breathing exercises
+        brf = tk.Frame(featf, bg=C_BG);  brf.pack(fill="x", pady=2)
+        self._breathing_var = tk.BooleanVar(value=self.config.get("breathing_exercises", False))
+        tk.Checkbutton(brf, text="Breathing exercises during breaks", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._breathing_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
+
+        # Desk exercises
+        deskf = tk.Frame(featf, bg=C_BG);  deskf.pack(fill="x", pady=2)
+        self._desk_var = tk.BooleanVar(value=self.config.get("desk_exercises", False))
+        tk.Checkbutton(deskf, text="Animated desk exercises", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._desk_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
 
         self._update_status()
         win.protocol("WM_DELETE_WINDOW", self._close_status)
@@ -1587,6 +2735,40 @@ class ScreenBreakApp:
                   relief="flat", width=2, cursor="hand2", command=rm).pack(side="left")
 
         self._brk_rows.append(row)
+
+    def _show_message_editor(self) -> None:
+        """Show editor for custom break messages."""
+        win = tk.Toplevel(self.root)
+        win.title("Custom Break Messages")
+        win.geometry("450x350")
+        win.configure(bg=C_BG)
+        win.transient(self._status_win)
+
+        tk.Label(win, text="Custom Break Messages", font=(FONT, 13, "bold"),
+                 fg=C_ACCENT2, bg=C_BG).pack(pady=(14, 8))
+        tk.Label(win, text="One message per line. Shown randomly during breaks.",
+                 font=(FONT, 9), fg=C_TEXT_DIM, bg=C_BG).pack()
+
+        txt = tk.Text(win, font=(FONT, 10), bg=C_CARD, fg=C_TEXT,
+                      relief="flat", padx=10, pady=8, height=12, wrap="word")
+        txt.pack(fill="both", expand=True, padx=14, pady=10)
+
+        # Load existing messages
+        messages = self.config.get("custom_messages", [])
+        txt.insert("1.0", "\n".join(messages))
+
+        def save_messages():
+            content = txt.get("1.0", "end").strip()
+            self.config["custom_messages"] = [m.strip() for m in content.split("\n") if m.strip()]
+            save_config(self.config)
+            win.destroy()
+
+        bf = tk.Frame(win, bg=C_BG)
+        bf.pack(pady=(0, 14))
+        tk.Button(bf, text="Save", font=(FONT, 10), bg=C_BTN_PRI, fg=C_TEXT,
+                  relief="flat", padx=16, pady=5, cursor="hand2", command=save_messages).pack(side="left", padx=4)
+        tk.Button(bf, text="Cancel", font=(FONT, 10), bg=C_BTN_SEC, fg=C_TEXT_DIM,
+                  relief="flat", padx=12, pady=5, cursor="hand2", command=win.destroy).pack(side="left")
 
     def _apply_settings(self) -> None:
         try:
@@ -1652,6 +2834,31 @@ class ScreenBreakApp:
                     self.config["mini_reminder_interval"] = mini_interval
             except ValueError:
                 pass
+
+            # Advanced settings
+            self.config["focus_mode"] = self._focus_var.get()
+            self.config["multi_monitor_overlay"] = self._multimon_var.get()
+            self.config["theme"] = self._theme_var.get()
+            self.config["hydration_tracking"] = self._hydration_var.get()
+            try:
+                self.config["hydration_reminder_interval"] = int(self._hydration_spin.get())
+                self.config["hydration_goal"] = int(self._hydration_goal_spin.get())
+            except ValueError:
+                pass
+            self.config["custom_sound_enabled"] = self._custom_sound_var.get()
+            self.config["custom_sound_path"] = self._sound_path_entry.get().strip()
+            self.config["use_custom_messages"] = self._custom_msg_var.get()
+            self.config["guided_eye_exercises"] = self._guided_eye_var.get()
+            self.config["breathing_exercises"] = self._breathing_var.get()
+            self.config["desk_exercises"] = self._desk_var.get()
+            try:
+                self.config["coast_margin_minutes"] = int(self._coast_spin.get())
+            except ValueError:
+                pass
+
+            # Apply theme if changed
+            apply_theme(self.config["theme"])
+
             save_config(self.config)
 
             self._reset_all_timers()
@@ -1666,7 +2873,7 @@ class ScreenBreakApp:
         dc = json.loads(json.dumps(DEFAULT_CONFIG))
         self.config.update(dc);  save_config(self.config)
 
-        # Refresh widgets
+        # Refresh interval widgets
         self._eye_spin.delete(0, "end");  self._eye_spin.insert(0, str(dc["eye_rest_interval"]))
         self._micro_spin.delete(0, "end");  self._micro_spin.insert(0, str(dc["micro_pause_interval"]))
         self._gap_spin.delete(0, "end");  self._gap_spin.insert(0, str(dc["minimum_break_gap"]))
@@ -1675,7 +2882,10 @@ class ScreenBreakApp:
         self._warn_spin.delete(0, "end");  self._warn_spin.insert(0, str(dc["warning_seconds"]))
         self._ws_entry.delete(0, "end");  self._ws_entry.insert(0, dc["work_start"])
         self._we_entry.delete(0, "end");  self._we_entry.insert(0, dc["work_end"])
+        self._coast_spin.delete(0, "end");  self._coast_spin.insert(0, str(dc["coast_margin_minutes"]))
+
         # Reset feature checkboxes
+        self._focus_var.set(dc["focus_mode"])
         self._idle_var.set(dc["idle_detection"])
         self._idle_spin.delete(0, "end");  self._idle_spin.insert(0, str(dc["idle_threshold"]))
         self._sound_var.set(dc["sound_enabled"])
@@ -1685,7 +2895,19 @@ class ScreenBreakApp:
         self._pomo_var.set(dc["pomodoro_mode"])
         self._mini_var.set(dc["mini_reminders"])
         self._mini_spin.delete(0, "end");  self._mini_spin.insert(0, str(dc["mini_reminder_interval"]))
+        self._multimon_var.set(dc["multi_monitor_overlay"])
+        self._theme_var.set(dc["theme"])
+        self._hydration_var.set(dc["hydration_tracking"])
+        self._hydration_spin.delete(0, "end");  self._hydration_spin.insert(0, str(dc["hydration_reminder_interval"]))
+        self._hydration_goal_spin.delete(0, "end");  self._hydration_goal_spin.insert(0, str(dc["hydration_goal"]))
+        self._custom_sound_var.set(dc["custom_sound_enabled"])
+        self._sound_path_entry.delete(0, "end");  self._sound_path_entry.insert(0, dc["custom_sound_path"])
+        self._custom_msg_var.set(dc["use_custom_messages"])
+        self._guided_eye_var.set(dc["guided_eye_exercises"])
+        self._breathing_var.set(dc["breathing_exercises"])
+        self._desk_var.set(dc["desk_exercises"])
 
+        # Reset scheduled breaks
         for row in list(self._brk_rows):
             row["frame"].destroy()
         self._brk_rows.clear()
@@ -1703,6 +2925,101 @@ class ScreenBreakApp:
             except tk.TclError:
                 pass
             self._status_win = None
+
+    def _toggle_status_window(self) -> None:
+        """Toggle status window - close if open, open if closed."""
+        if self._status_win:
+            try:
+                if self._status_win.winfo_exists():
+                    self._close_status()
+                    return
+            except tk.TclError:
+                self._status_win = None
+        self._show_status_window()
+
+    def _toggle_pause_ui(self) -> None:
+        """Toggle pause and update UI button."""
+        self._toggle_pause()
+        self._update_pause_btn()
+
+    def _update_pause_btn(self) -> None:
+        """Update pause button text based on state."""
+        if hasattr(self, '_pause_btn') and self._pause_btn:
+            try:
+                self._pause_btn.config(text="▶ Resume" if self.paused else "⏸ Pause")
+            except tk.TclError:
+                pass
+
+    def _toggle_gentle_ui(self) -> None:
+        """Toggle gentle mode and update UI button."""
+        self._toggle_low_energy()
+        self._update_gentle_btn()
+
+    def _update_gentle_btn(self) -> None:
+        """Update gentle mode button style based on state."""
+        if hasattr(self, '_gentle_btn') and self._gentle_btn:
+            try:
+                if self.low_energy:
+                    # Active - soft teal
+                    self._gentle_btn.config(bg=C_GENTLE, fg=C_BG)
+                else:
+                    # Inactive - muted
+                    self._gentle_btn.config(bg=C_BTN_SEC, fg=C_TEXT_DIM)
+            except tk.TclError:
+                pass
+
+    def _toggle_stats_win(self) -> None:
+        """Toggle stats window - close if open, open positioned to side."""
+        if self._stats_win:
+            try:
+                if self._stats_win.winfo_exists():
+                    self._stats_win.destroy()
+                    self._stats_win = None
+                    return
+            except tk.TclError:
+                self._stats_win = None
+        self._show_stats_win()
+        self._position_popup(self._stats_win)
+
+    def _toggle_notes_win(self) -> None:
+        """Toggle notes window - close if open, open positioned to side."""
+        if self._notes_win:
+            try:
+                if self._notes_win.winfo_exists():
+                    self._notes_win.destroy()
+                    self._notes_win = None
+                    return
+            except tk.TclError:
+                self._notes_win = None
+        self._show_notes_win()
+        self._position_popup(self._notes_win)
+
+    def _position_popup(self, popup_win) -> None:
+        """Position popup window to the side of status window, away from screen edge."""
+        if not popup_win or not self._status_win:
+            return
+        try:
+            self._status_win.update_idletasks()
+            popup_win.update_idletasks()
+            # Get status window position
+            sx = self._status_win.winfo_x()
+            sy = self._status_win.winfo_y()
+            sw = self._status_win.winfo_width()
+            # Get popup size
+            pw = popup_win.winfo_width()
+            ph = popup_win.winfo_height()
+            # Get screen width
+            screen_w = self._status_win.winfo_screenwidth()
+            # Position to the side furthest from screen edge
+            if sx > screen_w / 2:
+                # Status is on right side, put popup on left
+                px = sx - pw - 10
+            else:
+                # Status is on left side, put popup on right
+                px = sx + sw + 10
+            popup_win.geometry(f"+{max(0, px)}+{sy}")
+        except tk.TclError:
+            pass
 
     def _update_status(self) -> None:
         if not self._status_win:
@@ -1800,25 +3117,9 @@ class ScreenBreakApp:
             else:
                 tv.set("—");  dv.set("no more scheduled breaks today")
 
-        # ── State line ──
-        parts = []
-        if outside_hours:
-            parts.append("OUTSIDE WORK HOURS")
-        if self.idle:
-            parts.append("IDLE")
-        if self.paused: parts.append("PAUSED")
-        if self.low_energy: parts.append("LOW ENERGY")
-        if self.overlay_up: parts.append("overlay active")
-        if self.warning_up: parts.append("warning active")
-        if self.snooze_until and calc_time < self.snooze_until:
-            parts.append(f"snoozed ({int((self.snooze_until-calc_time).total_seconds())}s)")
-        # Show if in minimum gap cooldown (use calc_time for pause-aware calculation)
-        min_gap = self.config.get("minimum_break_gap", 20)
-        since_last = (calc_time - self.last_any_break).total_seconds() / 60
-        if since_last < min_gap and not self.overlay_up and not self.warning_up and not self.paused:
-            gap_rem = int(min_gap - since_last)
-            parts.append(f"{min_gap}-min gap ({gap_rem}m left)")
-        self._st_state.set("  •  ".join(parts) if parts else "active")
+        # Update control buttons
+        self._update_pause_btn()
+        self._update_gentle_btn()
 
         try:
             self._status_win.after(1000, self._update_status)
@@ -1881,19 +3182,38 @@ class ScreenBreakApp:
     # ━━━ System Tray ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _create_tray_icon(self, paused: bool = False) -> Image.Image:
-        """Create tray icon. Grayed out when paused."""
+        """Create flat Android-style stopwatch icon."""
         img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
+
+        # Colors - flat and bold
         if paused:
-            # Grayed out icon when paused
-            draw.ellipse([4, 4, 60, 60], fill="#374151", outline="#6b7280", width=2)
-            draw.rectangle([20, 18, 28, 46], fill="#9ca3af")
-            draw.rectangle([36, 18, 44, 46], fill="#9ca3af")
+            FILL = (120, 120, 130, 255)   # Muted gray when paused
+            ACCENT = (180, 180, 190, 255)
         else:
-            # Normal colorful icon
-            draw.ellipse([4, 4, 60, 60], fill="#1e293b", outline="#0ea5e9", width=2)
-            draw.rectangle([20, 18, 28, 46], fill="#f1f5f9")
-            draw.rectangle([36, 18, 44, 46], fill="#f1f5f9")
+            FILL = (14, 165, 233, 255)    # Bright sky blue (matches app accent)
+            ACCENT = (255, 255, 255, 255)  # White
+
+        cx, cy = 32, 34
+        r = 22
+
+        # Main circle - flat fill
+        draw.ellipse([cx-r, cy-r, cx+r, cy+r], fill=FILL)
+
+        # Small button/crown at top
+        draw.rectangle([cx-4, 4, cx+4, 12], fill=FILL)
+        draw.ellipse([cx-5, 2, cx+5, 8], fill=FILL)
+
+        # Simple clock hand pointing up-right (like 2 o'clock)
+        hand_angle = math.radians(-60)  # 2 o'clock position
+        hand_len = r - 6
+        hx = int(cx + hand_len * math.cos(hand_angle))
+        hy = int(cy + hand_len * math.sin(hand_angle))
+        draw.line([(cx, cy), (hx, hy)], fill=ACCENT, width=4)
+
+        # Center dot
+        draw.ellipse([cx-4, cy-4, cx+4, cy+4], fill=ACCENT)
+
         return img
 
     def _update_tray_icon(self) -> None:
@@ -1909,20 +3229,22 @@ class ScreenBreakApp:
         img = self._create_tray_icon(self.paused)
 
         menu = pystray.Menu(
-            pystray.MenuItem("Screen Break", None, enabled=False),
+            # Hidden default item for left-click
+            pystray.MenuItem("Open", lambda icon, item: self.root.after(0, self._toggle_status_window),
+                           default=True, visible=False),
+            pystray.MenuItem("Screen Break",
+                lambda icon, item: self.root.after(0, self._show_status_window)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 lambda item: "▶  Resume" if self.paused else "⏸  Pause",
                 lambda icon, item: self._toggle_pause()),
             pystray.MenuItem(
-                lambda item: "🔋  Normal energy" if self.low_energy else "🪫  Low energy",
+                lambda item: "✓  Gentle mode" if self.low_energy else "🪫  Gentle mode",
                 lambda icon, item: self._toggle_low_energy()),
             pystray.MenuItem("📊  Statistics",
                 lambda icon, item: self.root.after(0, self._show_stats_win)),
             pystray.MenuItem("📝  Notes",
                 lambda icon, item: self.root.after(0, self._show_notes_win)),
-            pystray.MenuItem("⏱  Status & Settings",
-                lambda icon, item: self.root.after(0, self._show_status_window)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit", self._quit),
         )

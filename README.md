@@ -4,6 +4,7 @@ A healthy break reminder app that runs in your system tray. Reminds you to rest 
 
 ## Features
 
+### Core Features
 - **20-20-20 Eye Rest** — Every 20 minutes, look at something 20 feet away for 20 seconds
 - **Micro-pause Reminders** — Stand up, stretch, and move around every 45 minutes
 - **Scheduled Breaks** — Set specific times for longer breaks (lunch, afternoon recovery, etc.)
@@ -12,15 +13,26 @@ A healthy break reminder app that runs in your system tray. Reminds you to rest 
 - **Statistics & Streaks** — Track your breaks and build healthy habits
 - **Sound Notifications** — Audio alerts when breaks start
 - **Strict Mode** — Prevent skipping breaks (only snooze allowed)
-- **Screen Dimming** — Smooth fade-in effect during eye rest for a more immersive break
-- **Pomodoro Mode** — Alternative 25-minute work / 5-minute break cycle (long break every 4th)
+- **Screen Dimming** — Smooth fade-in effect during eye rest
+- **Pomodoro Mode** — Alternative 25-minute work / 5-minute break cycle
 - **Mini Reminders** — Quick posture, hydration, and blink nudges between breaks
 - **Low Energy Mode** — Gentler, less frequent reminders when you're not feeling 100%
 - **Advance Warning** — A clock icon appears before each break so you can wrap up
 - **Work Hours** — Only active during your configured work hours
 - **Notes** — Capture where you left off before taking a break
-- **Fully Configurable** — All intervals, durations, and settings can be customized
-- **Cross-platform** — Works on Windows, macOS, and Linux
+
+### Premium Features (v2.0)
+- **Presentation Mode** — Auto-pauses breaks during fullscreen apps (presentations, games, videos)
+- **Multi-Monitor Support** — Break overlays appear on all connected monitors
+- **Custom Sounds** — Use your own .wav, .mp3, or .ogg files for notifications
+- **Themes** — Dark, Light, and Nord color schemes with instant switching
+- **Guided Eye Exercises** — Animated dot-tracking exercises (circle, figure-8, near-far focus)
+- **Breathing Exercises** — Guided breathing with visual animation (box, relaxing, energizing patterns)
+- **Desk Exercises** — Animated stretch instructions during micro-pauses
+- **Custom Messages** — Add your own motivational messages to display during breaks
+- **Hydration Tracking** — Water intake reminders with daily goal tracking
+- **Focus Sessions** — Pomodoro-style timer with task naming
+- **Daily/Weekly Reports** — Visual charts showing your break history
 
 ## Installation
 
@@ -42,6 +54,9 @@ cd screen-break
 # Install dependencies
 pip install pystray Pillow
 
+# Optional: for multi-monitor support
+pip install screeninfo
+
 # Run
 python screen_break.py
 
@@ -55,9 +70,10 @@ Once running, Screen Break lives in your system tray:
 
 - **Right-click** the tray icon — access menu:
   - **Pause/Resume** — temporarily disable all reminders
-  - **Low energy** — switch to gentler reminder intervals (1.5x longer)
-  - **Statistics** — view your break history and streaks
+  - **Gentle mode** — switch to gentler reminder intervals (1.5x longer)
+  - **Stats** — view your break history, streaks, and charts
   - **Notes** — view/export notes captured during breaks
+  - **Focus** — start a named focus session with timer
   - **Status & Settings** — configure everything
   - **Quit** — exit the app
 
@@ -89,13 +105,14 @@ Settings are stored in your home directory:
 - **Notes:** `~/screen_break_notes.json`
 - **Statistics:** `~/screen_break_stats.json`
 
-### Settings
+### Settings Reference
 
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `eye_rest_interval` | 20 | Minutes between eye rest reminders |
 | `micro_pause_interval` | 45 | Minutes between micro-pause reminders |
 | `minimum_break_gap` | 20 | Minimum minutes between any two breaks |
+| `coast_margin_minutes` | 10 | Skip eye rest if scheduled break is within this many minutes |
 | `warning_seconds` | 60 | Seconds of advance warning before breaks |
 | `snooze_minutes` | 5 | Duration of snooze when clicking "X more min" |
 | `eye_rest_duration` | 20 | Seconds for eye rest countdown |
@@ -109,16 +126,22 @@ Settings are stored in your home directory:
 | `strict_mode` | false | Prevent skipping breaks (only snooze) |
 | `screen_dim` | true | Smooth fade-in effect during eye rest |
 | `pomodoro_mode` | false | Use 25 min work / 5 min break cycles |
-| `mini_reminders` | false | Enable posture/hydration/blink nudges |
-| `mini_reminder_interval` | 10 | Minutes between mini reminders |
+| `focus_mode` | true | Auto-pause during fullscreen apps |
+| `theme` | "nord" | Color theme: dark, light, or nord |
+| `guided_eye_exercises` | false | Enable animated eye exercises |
+| `breathing_exercises` | false | Enable breathing exercises during micro-pauses |
+| `desk_exercises` | false | Enable animated desk stretch instructions |
+| `hydration_tracking` | false | Enable water intake tracking |
+| `hydration_goal` | 8 | Daily water glasses goal |
+| `multi_monitor_overlay` | true | Show break overlay on all monitors |
 
 ## Building from Source
 
 To create a standalone executable:
 
 ```bash
-# Install PyInstaller
-pip install pyinstaller
+# Install build dependencies
+pip install pyinstaller pystray Pillow screeninfo
 
 # Build
 pyinstaller screen_break.spec
