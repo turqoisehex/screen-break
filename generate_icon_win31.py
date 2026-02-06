@@ -179,9 +179,8 @@ def generate_icon():
     """Generate icon.ico and icon.png files."""
     sizes = [16, 32, 48, 64, 128, 256]
     images = [create_win31_stopwatch(s) for s in sizes]
-    images[0].save('icon.ico', format='ICO',
-                   sizes=[(s, s) for s in sizes],
-                   append_images=images[1:])
+    # ICO: save largest first, append smaller — PIL requires this order
+    images[-1].save('icon.ico', format='ICO', append_images=images[:-1])
     images[-1].save('icon.png', format='PNG')
 
 
