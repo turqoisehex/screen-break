@@ -19,7 +19,7 @@ Usage:
     python screen_break.py --test   (short intervals for testing)
     pythonw screen_break.py         (Windows — no console)
 
-Source: https://github.com/YOUR_USERNAME/screen-break
+Source: https://github.com/turqoisehex/screen-break
 """
 from __future__ import annotations
 import sys, os, platform

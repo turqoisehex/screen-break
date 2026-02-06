@@ -36,7 +36,7 @@ Requires Python 3.10+
 
 ```bash
 # Clone the repo
-git clone https://github.com/YOUR_USERNAME/screen-break.git
+git clone https://github.com/turqoisehex/screen-break.git
 cd screen-break
 
 # Install dependencies
