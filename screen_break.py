@@ -3287,37 +3287,87 @@ class ScreenBreakApp:
     # ━━━ System Tray ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
     def _create_tray_icon(self, paused: bool = False) -> Image.Image:
-        """Create flat Android-style stopwatch icon."""
-        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        """Create Windows 3.1 style stopwatch tray icon."""
+        size = 64
+        img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
         draw = ImageDraw.Draw(img)
 
-        # Colors - flat and bold
         if paused:
-            FILL = (120, 120, 130, 255)   # Muted gray when paused
-            ACCENT = (180, 180, 190, 255)
+            TEAL = (100, 110, 110, 255)
+            DARK_TEAL = (70, 80, 80, 255)
+            LIGHT_CYAN = (140, 150, 150, 255)
         else:
-            FILL = (14, 165, 233, 255)    # Bright sky blue (matches app accent)
-            ACCENT = (255, 255, 255, 255)  # White
+            TEAL = (0, 128, 128, 255)
+            DARK_TEAL = (0, 80, 80, 255)
+            LIGHT_CYAN = (128, 192, 192, 255)
+        BLACK = (0, 0, 0, 255)
+        WHITE = (255, 255, 255, 255)
+        GRAY = (128, 128, 128, 255)
 
-        cx, cy = 32, 34
-        r = 22
+        cx, cy = 32, 36
+        r_outer = 23
+        r_inner = r_outer - 5
 
-        # Main circle - flat fill
-        draw.ellipse([cx-r, cy-r, cx+r, cy+r], fill=FILL)
+        # Crown button
+        draw.rectangle([cx-4+1, 20+1, cx+4+1, 16+1], fill=(64,64,64,255))
+        draw.rectangle([cx-4, 14, cx+4, 20], fill=TEAL, outline=BLACK)
+        draw.line([(cx-3, 15), (cx+3, 15)], fill=LIGHT_CYAN)
+        draw.line([(cx-3, 15), (cx-3, 19)], fill=LIGHT_CYAN)
 
-        # Small button/crown at top
-        draw.rectangle([cx-4, 4, cx+4, 12], fill=FILL)
-        draw.ellipse([cx-5, 2, cx+5, 8], fill=FILL)
+        # Outer ring + teal rim
+        draw.ellipse([cx-r_outer, cy-r_outer, cx+r_outer, cy+r_outer], fill=BLACK)
+        draw.ellipse([cx-r_outer+1, cy-r_outer+1, cx+r_outer-1, cy+r_outer-1], fill=TEAL)
 
-        # Simple clock hand pointing up-right (like 2 o'clock)
-        hand_angle = math.radians(-60)  # 2 o'clock position
-        hand_len = r - 6
-        hx = int(cx + hand_len * math.cos(hand_angle))
-        hy = int(cy + hand_len * math.sin(hand_angle))
-        draw.line([(cx, cy), (hx, hy)], fill=ACCENT, width=4)
+        # Rim bevel
+        for a_deg in range(200, 345):
+            a = math.radians(a_deg)
+            bx = int(cx + (r_outer-2) * math.cos(a))
+            by = int(cy + (r_outer-2) * math.sin(a))
+            draw.point((bx, by), fill=LIGHT_CYAN)
+        for a_deg in range(20, 165):
+            a = math.radians(a_deg)
+            bx = int(cx + (r_outer-2) * math.cos(a))
+            by = int(cy + (r_outer-2) * math.sin(a))
+            draw.point((bx, by), fill=DARK_TEAL)
 
-        # Center dot
-        draw.ellipse([cx-4, cy-4, cx+4, cy+4], fill=ACCENT)
+        # Inner face
+        draw.ellipse([cx-r_inner-1, cy-r_inner-1, cx+r_inner+1, cy+r_inner+1], fill=BLACK)
+        draw.ellipse([cx-r_inner, cy-r_inner, cx+r_inner, cy+r_inner], fill=WHITE)
+
+        # Crosshatch on face
+        r_sq = (r_inner - 1) ** 2
+        for offset in range(-2*r_inner, 2*r_inner+1, 4):
+            pts = []
+            for x in range(cx-r_inner+1, cx+r_inner):
+                y = x + offset
+                if (x-cx)**2 + (y-cy)**2 <= r_sq:
+                    pts.append((x, y))
+            if len(pts) >= 2:
+                draw.line([pts[0], pts[-1]], fill=TEAL)
+            pts = []
+            for x in range(cx-r_inner+1, cx+r_inner):
+                y = -x + offset + 2*cy
+                if (x-cx)**2 + (y-cy)**2 <= r_sq:
+                    pts.append((x, y))
+            if len(pts) >= 2:
+                draw.line([pts[0], pts[-1]], fill=TEAL)
+
+        # Tick marks
+        for h in [0, 90, 180, 270]:
+            a = math.radians(h - 90)
+            ti, to = r_inner - 7, r_inner - 2
+            draw.line([(int(cx+ti*math.cos(a)), int(cy+ti*math.sin(a))),
+                       (int(cx+to*math.cos(a)), int(cy+to*math.sin(a)))], fill=BLACK, width=2)
+
+        # Clock hand
+        ha = math.radians(-60)
+        hl = r_inner - 8
+        hx, hy = int(cx + hl * math.cos(ha)), int(cy + hl * math.sin(ha))
+        draw.line([(cx+1, cy+1), (hx+1, hy+1)], fill=GRAY, width=2)
+        draw.line([(cx, cy), (hx, hy)], fill=BLACK, width=2)
+
+        # Center hub
+        draw.ellipse([cx-3, cy-3, cx+3, cy+3], fill=TEAL, outline=BLACK)
 
         return img
 
