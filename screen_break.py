@@ -567,6 +567,10 @@ DEFAULT_CONFIG = {
     "breathing_exercises": False,     # Breathing animation during breaks
     "desk_exercises": False,          # Animated desk exercises
     "focus_session_duration": 25,     # Focus session length in minutes
+    # Accessibility (Windows 11 tray icon is hidden by default)
+    "show_floating_widget": True,     # Persistent countdown widget on screen
+    "widget_position": None,          # Saved [x, y] position (None = bottom-right default)
+    "show_in_taskbar": True,          # Show app in Windows taskbar (clickable)
     "breaks": [
         {"time": "09:45", "duration": 15, "title": "Stretch Break"},
         {"time": "11:30", "duration": 30, "title": "Movement & Mindfulness"},
@@ -891,7 +895,7 @@ class ScreenBreakApp:
 
     def __init__(self):
         self.root = tk.Tk()
-        self.root.withdraw()
+        self.root.withdraw()  # Hide immediately; may be replaced by taskbar mode below
 
         self.config = load_config()
         self.notes  = self._load_notes()
@@ -900,6 +904,20 @@ class ScreenBreakApp:
 
         # Apply theme from config
         apply_theme(self.config.get("theme", "nord"))
+
+        # Taskbar presence: show app in taskbar so users can find it
+        # (Windows 11 hides tray icons in overflow by default)
+        if self.config.get("show_in_taskbar", True):
+            self.root.deiconify()
+            self.root.title("Screen Break")
+            self.root.geometry("1x1+0+0")
+            try:
+                self.root.attributes("-alpha", 0.0)
+            except tk.TclError:
+                pass
+            self.root.iconify()
+            self.root.protocol("WM_DELETE_WINDOW", lambda: self.root.iconify())
+            self.root.bind("<Map>", self._on_taskbar_click)
 
         self.paused = False;  self.low_energy = False
         self.pause_started = None  # Track when pause began for timer adjustment
@@ -916,6 +934,13 @@ class ScreenBreakApp:
 
         if HAS_TRAY:
             threading.Thread(target=self._run_tray, daemon=True).start()
+
+        # Floating widget state
+        self._widget_win = None
+        self._widget_label = None
+        self._widget_dragged = False
+        self._widget_drag_x = 0
+        self._widget_drag_y = 0
 
         self.last_mini_reminder = datetime.datetime.now()
         self._mini_win = None
@@ -939,6 +964,8 @@ class ScreenBreakApp:
 
         self._print_schedule()
         self._show_startup()
+        if self.config.get("show_floating_widget", True):
+            self.root.after(500, self._create_floating_widget)
         self._start_idle_monitor()
         self._start_mini_reminders()
         self._start_hydration_reminders()
@@ -2670,6 +2697,20 @@ class ScreenBreakApp:
                        bg=C_BG, variable=self._multimon_var, selectcolor=C_CARD_IN,
                        activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
 
+        # Floating widget
+        wdgf = tk.Frame(featf, bg=C_BG);  wdgf.pack(fill="x", pady=2)
+        self._widget_var = tk.BooleanVar(value=self.config.get("show_floating_widget", True))
+        tk.Checkbutton(wdgf, text="Floating countdown widget (always visible)", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._widget_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
+
+        # Taskbar presence
+        tbf = tk.Frame(featf, bg=C_BG);  tbf.pack(fill="x", pady=2)
+        self._taskbar_var = tk.BooleanVar(value=self.config.get("show_in_taskbar", True))
+        tk.Checkbutton(tbf, text="Show in taskbar (restart to apply)", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._taskbar_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
+
         # Theme selection (applies instantly)
         themef = tk.Frame(featf, bg=C_BG);  themef.pack(fill="x", pady=2)
         tk.Label(themef, text="Theme:", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
@@ -2928,6 +2969,16 @@ class ScreenBreakApp:
                 self.config["coast_margin_minutes"] = int(self._coast_spin.get())
             except ValueError:
                 pass
+
+            # Widget & taskbar settings
+            self.config["show_floating_widget"] = self._widget_var.get()
+            self.config["show_in_taskbar"] = self._taskbar_var.get()
+
+            # Apply floating widget toggle live
+            if self._widget_var.get() and not self._widget_win:
+                self._create_floating_widget()
+            elif not self._widget_var.get() and self._widget_win:
+                self._destroy_floating_widget()
 
             # Apply theme if changed
             apply_theme(self.config["theme"])
@@ -3286,6 +3337,192 @@ class ScreenBreakApp:
             print()
         except (UnicodeEncodeError, OSError):
             pass  # silently skip on consoles that can't print
+
+    # ━━━ Taskbar Presence ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _on_taskbar_click(self, event=None) -> None:
+        """Handle taskbar button click: open status window, re-minimize root."""
+        # Ignore events from child windows
+        if event and event.widget is not self.root:
+            return
+        self.root.after(10, self.root.iconify)
+        self.root.after(50, self._show_status_window)
+
+    # ━━━ Floating Widget ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def _create_floating_widget(self) -> None:
+        """Create a small always-on-top countdown widget."""
+        if self._widget_win:
+            return
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        try:
+            win.attributes("-alpha", 0.88)
+        except tk.TclError:
+            pass
+        win.configure(bg=C_ACCENT)
+
+        # Position: saved or default bottom-right
+        pos = self.config.get("widget_position")
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        w, h = 150, 32
+        if pos and isinstance(pos, list) and len(pos) == 2:
+            x, y = int(pos[0]), int(pos[1])
+            # Clamp to screen bounds
+            x = max(0, min(x, sw - w))
+            y = max(0, min(y, sh - h))
+        else:
+            x, y = sw - w - 20, sh - h - 60
+        win.geometry(f"{w}x{h}+{x}+{y}")
+
+        lbl = tk.Label(win, text="Screen Break", font=(FONT, 9, "bold"),
+                       fg="#ffffff", bg=C_ACCENT, cursor="hand2", padx=8)
+        lbl.pack(fill="both", expand=True)
+
+        self._widget_win = win
+        self._widget_label = lbl
+
+        # Dragging + click
+        for widget in (win, lbl):
+            widget.bind("<Button-1>", self._widget_press)
+            widget.bind("<B1-Motion>", self._widget_drag)
+            widget.bind("<ButtonRelease-1>", self._widget_release)
+            widget.bind("<Button-3>", self._widget_menu)
+
+        self._update_floating_widget()
+
+    def _widget_press(self, event) -> None:
+        """Record mouse position for drag."""
+        self._widget_drag_x = event.x_root - self._widget_win.winfo_x()
+        self._widget_drag_y = event.y_root - self._widget_win.winfo_y()
+        self._widget_dragged = False
+
+    def _widget_drag(self, event) -> None:
+        """Move widget with mouse."""
+        x = event.x_root - self._widget_drag_x
+        y = event.y_root - self._widget_drag_y
+        self._widget_win.geometry(f"+{x}+{y}")
+        self._widget_dragged = True
+
+    def _widget_release(self, event) -> None:
+        """On release: save position if dragged, else open status window."""
+        if self._widget_dragged:
+            # Save position
+            x = self._widget_win.winfo_x()
+            y = self._widget_win.winfo_y()
+            self.config["widget_position"] = [x, y]
+            save_config(self.config)
+        else:
+            self._toggle_status_window()
+
+    def _widget_menu(self, event) -> None:
+        """Show right-click context menu on widget."""
+        menu = tk.Menu(self._widget_win, tearoff=0)
+        pause_text = "Resume" if self.paused else "Pause"
+        menu.add_command(label=pause_text, command=lambda: self.root.after(0, self._toggle_pause_from_widget))
+        menu.add_command(label="Settings", command=lambda: self.root.after(0, self._show_status_window))
+        menu.add_separator()
+        menu.add_command(label="Quit", command=lambda: self.root.after(0, self._quit))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _toggle_pause_from_widget(self) -> None:
+        """Toggle pause and update widget + tray."""
+        self._toggle_pause()
+        self._update_tray_icon()
+        if hasattr(self, '_pause_btn') and self._pause_btn:
+            self._update_pause_btn()
+
+    def _update_floating_widget(self) -> None:
+        """Refresh the widget countdown every second."""
+        if not self._widget_win:
+            return
+        try:
+            if not self._widget_win.winfo_exists():
+                self._widget_win = None
+                return
+        except tk.TclError:
+            self._widget_win = None
+            return
+
+        now = datetime.datetime.now()
+        calc_time = self.pause_started if self.paused and self.pause_started else now
+
+        # Check work hours
+        t = now.time()
+        outside_hours = False
+        try:
+            ws = self._pt(self.config.get("work_start", "08:00"))
+            we = self._pt(self.config.get("work_end", "20:00"))
+            outside_hours = t < ws or t >= we
+        except ValueError:
+            pass
+
+        # Determine text
+        if outside_hours:
+            text = "Off hours"
+        elif self.idle:
+            text = "IDLE"
+        elif self.config.get("focus_mode", False) and self.fullscreen_active:
+            text = "Presenting"
+        elif self.paused:
+            text = "PAUSED"
+        else:
+            # Find the soonest countdown
+            best_label = "Eye"
+            el = (calc_time - self.last_eye_rest).total_seconds()
+            best_rem = max(0, self.eye_iv * 60 - el)
+
+            el = (calc_time - self.last_micro).total_seconds()
+            micro_rem = max(0, self.micro_iv * 60 - el)
+            if micro_rem < best_rem:
+                best_rem = micro_rem
+                best_label = "Micro"
+
+            # Check scheduled breaks
+            for brk in self.config.get("breaks", []):
+                key = brk["time"]
+                if self.acked_today.get(key) == now.date():
+                    continue
+                try:
+                    bt = datetime.datetime.combine(now.date(), self._pt(brk["time"]))
+                except (ValueError, AttributeError):
+                    continue
+                diff = (bt - now).total_seconds()
+                if diff > 0 and diff < best_rem:
+                    best_rem = diff
+                    best_label = "Break"
+
+            m, s = divmod(int(best_rem), 60)
+            h, m2 = divmod(m, 60)
+            if h > 0:
+                text = f"{best_label} {h}h {m2:02d}m"
+            else:
+                text = f"{best_label} {m:02d}:{s:02d}"
+
+        try:
+            self._widget_label.config(text=text)
+        except tk.TclError:
+            pass
+
+        try:
+            self._widget_win.after(1000, self._update_floating_widget)
+        except tk.TclError:
+            self._widget_win = None
+
+    def _destroy_floating_widget(self) -> None:
+        """Tear down the floating widget."""
+        if self._widget_win:
+            try:
+                self._widget_win.destroy()
+            except tk.TclError:
+                pass
+            self._widget_win = None
+            self._widget_label = None
 
     # ━━━ System Tray ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
