@@ -255,7 +255,7 @@ Canvas-based breathing animation.
 5. **Console encoding:** All `print()` output must use ASCII only — Windows cp1252 crashes on Unicode/emoji
 
 ### Open TODOs
-- **Icon:** Win 3.1 crosshatch icon code exists but exe/tray icon not rendering properly. Cosmetic only — does not affect functionality. May need Windows icon cache clear (`ie4uinit.exe -show`) or deeper investigation of pystray icon format requirements.
+- **Exe icon at 16x16:** Tray, taskbar, and large Explorer icons all look great. Only the small details-view icon in Explorer is garbled. ICO now uses BMP format for small sizes (was PNG). The 16x16 design still has too much detail — next step is to render at higher resolution and LANCZOS downscale, or use a minimal design for 16x16 only.
 
 ---
 
