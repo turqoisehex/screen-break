@@ -61,13 +61,14 @@ def _ensure_deps():
 HAS_TRAY = _ensure_deps()
 
 # ─── Imports ──────────────────────────────────────────────────
-import threading, datetime, json, math, random
+import threading, datetime, json, math, random, time
 from typing import Any, Callable, Optional
+
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
 
 if HAS_TRAY:
     try:
         import pystray
-        from PIL import Image, ImageDraw
     except ImportError:
         HAS_TRAY = False
 
@@ -103,7 +104,7 @@ SLEEP_DETECTION_MINUTES = 120      # If >2 hours since last check, assume laptop
 CATCHUP_WINDOW_SECONDS = 180       # Catch-up window for scheduled breaks (3 minutes)
 DEFAULT_COAST_MARGIN = 10          # Default coast margin (now configurable)
 STARTUP_DISMISS_MS = 6000          # Auto-dismiss startup notification after 6 seconds
-WARNING_ICON_SIZE = 62             # Size of warning clock icon (larger for visibility)
+WARNING_ICON_SIZE = 124            # Size of warning clock icon (2x for visibility)
 WARNING_ICON_MARGIN = 18           # Margin from screen edge
 
 # ─── Config ───────────────────────────────────────────────────
@@ -424,14 +425,14 @@ class GuidedEyeExercise:
         self.canvas.coords(self.dot, x - 15, y - 15, x + 15, y + 15)
 
     def animate(self):
-        """Advance animation one step."""
+        """Advance animation one step (~60fps)."""
         if not self.running:
             return
-        self.angle += 0.08
+        self.angle += 0.026
         if self.angle > 2 * math.pi:
             self.angle -= 2 * math.pi
         self._update_position()
-        self.canvas.after(50, self.animate)
+        self.canvas.after(16, self.animate)
 
     def start(self):
         self.running = True
@@ -571,6 +572,18 @@ DEFAULT_CONFIG = {
     "show_floating_widget": True,     # Persistent countdown widget on screen
     "widget_position": None,          # Saved [x, y] position (None = bottom-right default)
     "show_in_taskbar": True,          # Show app in Windows taskbar (clickable)
+    "status_always_on_top": False,    # Keep Settings window above other windows
+    # Breathing circle widget (always-on-top ambient breathing guide)
+    "breathing_widget_enabled": False,
+    "breathing_widget_inhale": 4,     # Inhale duration in seconds
+    "breathing_widget_hold_in": 0,    # Hold at peak in seconds
+    "breathing_widget_exhale": 4,     # Exhale duration in seconds
+    "breathing_widget_hold_out": 0,   # Hold at bottom in seconds
+    "breathing_widget_alpha": 0.7,    # Window opacity 0.05-1.0
+    "breathing_widget_bg": "transparent",  # "transparent", "dark", "teal"
+    "breathing_widget_size": 120,     # Circle diameter in px (60+, no upper limit)
+    "breathing_widget_click_through": True,  # Click passes through widget (Ctrl+drag to move)
+    "breathing_widget_position": None,  # Saved [x, y]
     "breaks": [
         {"time": "09:45", "duration": 15, "title": "Stretch Break"},
         {"time": "11:30", "duration": 30, "title": "Movement & Mindfulness"},
@@ -942,6 +955,17 @@ class ScreenBreakApp:
         self._widget_drag_x = 0
         self._widget_drag_y = 0
 
+        # Breathing circle widget state
+        self._breath_win = None
+        self._breath_canvas = None
+        self._breath_photo = None  # prevent GC of PhotoImage
+        self._breath_running = False
+        self._breath_dragged = False
+        self._breath_drag_x = 0
+        self._breath_drag_y = 0
+        self._breath_hwnd = None
+        self._breath_ct_active = False  # click-through currently on
+
         self.last_mini_reminder = datetime.datetime.now()
         self._mini_win = None
         self.last_hydration_reminder = datetime.datetime.now()
@@ -966,6 +990,8 @@ class ScreenBreakApp:
         self._show_startup()
         if self.config.get("show_floating_widget", True):
             self.root.after(500, self._create_floating_widget)
+        if self.config.get("breathing_widget_enabled", False):
+            self.root.after(600, self._create_breathing_widget)
         self._start_idle_monitor()
         self._start_mini_reminders()
         self._start_hydration_reminders()
@@ -1031,15 +1057,15 @@ class ScreenBreakApp:
         # Position in bottom-right corner
         sw = win.winfo_screenwidth()
         sh = win.winfo_screenheight()
-        w, h = 280, 70
+        w, h = 420, 120
         win.geometry(f"{w}x{h}+{sw-w-20}+{sh-h-60}")
 
-        f = tk.Frame(win, bg=C_CARD, padx=12, pady=8)
+        f = tk.Frame(win, bg=C_CARD, padx=20, pady=14)
         f.pack(fill="both", expand=True)
 
-        tk.Label(f, text=f"{emoji}  {title}", font=(FONT, 11, "bold"),
+        tk.Label(f, text=f"{emoji}  {title}", font=(FONT, 16, "bold"),
                  fg=C_ACCENT2, bg=C_CARD).pack(anchor="w")
-        tk.Label(f, text=desc, font=(FONT, 9), fg=C_TEXT_DIM, bg=C_CARD).pack(anchor="w")
+        tk.Label(f, text=desc, font=(FONT, 12), fg=C_TEXT_DIM, bg=C_CARD).pack(anchor="w", pady=(4, 0))
 
         self._mini_win = win
 
@@ -1548,7 +1574,7 @@ class ScreenBreakApp:
 
         c = tk.Canvas(w, width=sz, height=sz, bg=C_W_BG, highlightthickness=0, cursor="hand2")
         c.pack()
-        cx, cy, r = sz//2, sz//2, 20
+        cx, cy, r = sz//2, sz//2, 40
         self._draw_clock(c, cx, cy, r, countdown, countdown)
         c.bind("<Button-1>", lambda e: self._dismiss_warning())
 
@@ -1556,9 +1582,9 @@ class ScreenBreakApp:
         def s_tip(e):
             self._tip = tk.Toplevel(w);  self._tip.overrideredirect(True)
             self._tip.attributes("-topmost", True);  self._tip.configure(bg=C_CARD)
-            self._tip.geometry(f"210x28+{sw-sz-mg-220}+{mg+sz+4}")
-            tk.Label(self._tip, text=f"Break in ~{self._warn_rem}s — click to go now",
-                     font=(FONT, 9), fg=C_TEXT_DIM, bg=C_CARD, padx=6).pack(fill="both", expand=True)
+            self._tip.geometry(f"240x32+{sw-sz-mg-250}+{mg+sz+4}")
+            tk.Label(self._tip, text=f"Break in ~{self._warn_rem}s -- click to go now",
+                     font=(FONT, 10), fg=C_TEXT_DIM, bg=C_CARD, padx=8).pack(fill="both", expand=True)
         def h_tip(e):
             if self._tip:
                 try:
@@ -1573,20 +1599,20 @@ class ScreenBreakApp:
 
     def _draw_clock(self, c, cx, cy, r, rem, tot):
         c.delete("all")
-        gr = r + 5
-        c.create_oval(cx-gr, cy-gr, cx+gr, cy+gr, fill="", outline=C_W_GL, width=1)
-        c.create_oval(cx-r, cy-r, cx+r, cy+r, fill=C_CARD, outline=C_W_GL, width=2)
+        gr = r + 10
+        c.create_oval(cx-gr, cy-gr, cx+gr, cy+gr, fill="", outline=C_W_GL, width=2)
+        c.create_oval(cx-r, cy-r, cx+r, cy+r, fill=C_CARD, outline=C_W_GL, width=3)
         if tot > 0:
             # Stopwatch style: fill clockwise as time elapses (not counter-clockwise drain)
             elapsed = tot - rem
             ext = (elapsed / tot) * 360
-            c.create_arc(cx-r+4, cy-r+4, cx+r-4, cy+r-4,
+            c.create_arc(cx-r+8, cy-r+8, cx+r-8, cy+r-8,
                          start=90, extent=-ext, fill=C_W_GL, outline="", stipple="gray50")
-        c.create_line(cx, cy, cx, cy-r+7, fill=C_TEXT, width=2)
-        hx = cx + int((r-9)*math.sin(math.radians(60)))
-        hy = cy - int((r-9)*math.cos(math.radians(60)))
-        c.create_line(cx, cy, hx, hy, fill=C_TEXT, width=2)
-        c.create_oval(cx-2, cy-2, cx+2, cy+2, fill=C_TEXT, outline="")
+        c.create_line(cx, cy, cx, cy-r+14, fill=C_TEXT, width=3)
+        hx = cx + int((r-18)*math.sin(math.radians(60)))
+        hy = cy - int((r-18)*math.cos(math.radians(60)))
+        c.create_line(cx, cy, hx, hy, fill=C_TEXT, width=3)
+        c.create_oval(cx-3, cy-3, cx+3, cy+3, fill=C_TEXT, outline="")
 
     def _anim_warning(self, c: tk.Canvas, cx: int, cy: int, r: int) -> None:
         if not self.warning_up or not self.warning_window:
@@ -1860,7 +1886,7 @@ class ScreenBreakApp:
         # Determine if we need extra height for animations
         has_breathing = self.config.get("breathing_exercises", False)
         has_desk = self.config.get("desk_exercises", False)
-        win_height = 380 + (120 if has_breathing else 0) + (100 if has_desk else 0)
+        win_height = 450 + (120 if has_breathing else 0) + (100 if has_desk else 0)
 
         ov = tk.Toplevel(self.root)
         ov.overrideredirect(True);  ov.attributes("-topmost", True)
@@ -1929,6 +1955,12 @@ class ScreenBreakApp:
             self._desk_exercise = DeskExerciseAnimation(desk_label, exercise_data)
             self._desk_exercise.start()
 
+        tk.Label(card, text="Capture where you are (optional):",
+                 font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD, anchor="w").pack(fill="x", pady=(6, 2))
+        note = tk.Text(card, height=2, font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT,
+                       insertbackground=C_TEXT, relief="flat", padx=8, pady=6, wrap="word")
+        note.pack(fill="x", pady=(0, 8))
+
         tk.Label(card, text=datetime.datetime.now().strftime("%I:%M %p").lstrip("0"),
                  font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD).pack(pady=(6, 6))
 
@@ -1941,6 +1973,7 @@ class ScreenBreakApp:
         sm = self.config.get("snooze_minutes", 5)
 
         def back_from_break():
+            self._grab_note(note)
             # Stop animations
             if self._breathing_exercise:
                 self._breathing_exercise.stop()
@@ -1965,6 +1998,7 @@ class ScreenBreakApp:
             self._dismiss(ov)
 
         def snooze_micro():
+            self._grab_note(note)
             if self._breathing_exercise:
                 self._breathing_exercise.stop()
             if self._desk_exercise:
@@ -2379,6 +2413,8 @@ class ScreenBreakApp:
         win = tk.Toplevel(self.root)
         win.title("Screen Break — Status & Settings")
         win.configure(bg=C_BG);  win.resizable(False, True)
+        if self.config.get("status_always_on_top", False):
+            win.attributes("-topmost", True)
         self._status_win = win
 
         pad = dict(padx=20)
@@ -2711,6 +2747,83 @@ class ScreenBreakApp:
                        bg=C_BG, variable=self._taskbar_var, selectcolor=C_CARD_IN,
                        activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
 
+        # Always on top for settings window
+        aotf = tk.Frame(featf, bg=C_BG);  aotf.pack(fill="x", pady=2)
+        self._aot_var = tk.BooleanVar(value=self.config.get("status_always_on_top", False))
+        tk.Checkbutton(aotf, text="Settings window always on top", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._aot_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
+
+        # --- Breathing circle widget ---
+        bw_header = tk.Label(featf, text="Breathing Circle", font=(FONT, 10, "bold"),
+                             fg=C_ACCENT2, bg=C_BG, anchor="w")
+        bw_header.pack(fill="x", pady=(8, 2))
+
+        bwf = tk.Frame(featf, bg=C_BG);  bwf.pack(fill="x", pady=2)
+        self._breath_enabled_var = tk.BooleanVar(value=self.config.get("breathing_widget_enabled", False))
+        tk.Checkbutton(bwf, text="Breathing circle widget (always visible)", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._breath_enabled_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
+
+        bwrow1 = tk.Frame(featf, bg=C_BG);  bwrow1.pack(fill="x", pady=1, padx=(20, 0))
+        tk.Label(bwrow1, text="In:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+        self._breath_inhale_spin = tk.Spinbox(bwrow1, from_=1, to=20, width=2,
+            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+            relief="flat", justify="center")
+        self._breath_inhale_spin.pack(side="left");  self._breath_inhale_spin.delete(0, "end")
+        self._breath_inhale_spin.insert(0, str(self.config.get("breathing_widget_inhale", 4)))
+        tk.Label(bwrow1, text="s Hold:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+        self._breath_hold_in_spin = tk.Spinbox(bwrow1, from_=0, to=15, width=2,
+            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+            relief="flat", justify="center")
+        self._breath_hold_in_spin.pack(side="left");  self._breath_hold_in_spin.delete(0, "end")
+        self._breath_hold_in_spin.insert(0, str(self.config.get("breathing_widget_hold_in", 0)))
+        tk.Label(bwrow1, text="s", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+
+        bwrow1b = tk.Frame(featf, bg=C_BG);  bwrow1b.pack(fill="x", pady=1, padx=(20, 0))
+        tk.Label(bwrow1b, text="Out:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+        self._breath_exhale_spin = tk.Spinbox(bwrow1b, from_=1, to=20, width=2,
+            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+            relief="flat", justify="center")
+        self._breath_exhale_spin.pack(side="left");  self._breath_exhale_spin.delete(0, "end")
+        self._breath_exhale_spin.insert(0, str(self.config.get("breathing_widget_exhale", 4)))
+        tk.Label(bwrow1b, text="s Hold:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+        self._breath_hold_out_spin = tk.Spinbox(bwrow1b, from_=0, to=15, width=2,
+            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+            relief="flat", justify="center")
+        self._breath_hold_out_spin.pack(side="left");  self._breath_hold_out_spin.delete(0, "end")
+        self._breath_hold_out_spin.insert(0, str(self.config.get("breathing_widget_hold_out", 0)))
+        tk.Label(bwrow1b, text="s", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+
+        bwrow2 = tk.Frame(featf, bg=C_BG);  bwrow2.pack(fill="x", pady=1, padx=(20, 0))
+        tk.Label(bwrow2, text="Size:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+        self._breath_size_spin = tk.Spinbox(bwrow2, from_=60, to=9999, width=4, increment=10,
+            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+            relief="flat", justify="center")
+        self._breath_size_spin.pack(side="left");  self._breath_size_spin.delete(0, "end")
+        self._breath_size_spin.insert(0, str(self.config.get("breathing_widget_size", 120)))
+        tk.Label(bwrow2, text="px  Opacity:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+        self._breath_alpha_spin = tk.Spinbox(bwrow2, from_=5, to=100, width=3, increment=5,
+            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+            relief="flat", justify="center")
+        self._breath_alpha_spin.pack(side="left");  self._breath_alpha_spin.delete(0, "end")
+        self._breath_alpha_spin.insert(0, str(int(self.config.get("breathing_widget_alpha", 0.7) * 100)))
+        tk.Label(bwrow2, text="%", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+
+        bwrow3 = tk.Frame(featf, bg=C_BG);  bwrow3.pack(fill="x", pady=1, padx=(20, 0))
+        tk.Label(bwrow3, text="Bg:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+        self._breath_bg_var = tk.StringVar(value=self.config.get("breathing_widget_bg", "transparent"))
+        for bg_name in ["transparent", "dark", "teal"]:
+            tk.Radiobutton(bwrow3, text=bg_name.capitalize(), variable=self._breath_bg_var, value=bg_name,
+                          font=(FONT, 9), fg=C_TEXT_DIM, bg=C_BG, selectcolor=C_CARD_IN,
+                          activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left", padx=2)
+
+        bwrow4 = tk.Frame(featf, bg=C_BG);  bwrow4.pack(fill="x", pady=1, padx=(20, 0))
+        self._breath_ct_var = tk.BooleanVar(value=self.config.get("breathing_widget_click_through", True))
+        tk.Checkbutton(bwrow4, text="Click-through (Ctrl+drag to move)", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._breath_ct_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
+
         # Theme selection (applies instantly)
         themef = tk.Frame(featf, bg=C_BG);  themef.pack(fill="x", pady=2)
         tk.Label(themef, text="Theme:", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
@@ -2973,12 +3086,48 @@ class ScreenBreakApp:
             # Widget & taskbar settings
             self.config["show_floating_widget"] = self._widget_var.get()
             self.config["show_in_taskbar"] = self._taskbar_var.get()
+            self.config["status_always_on_top"] = self._aot_var.get()
+            if self._status_win:
+                try:
+                    self._status_win.attributes("-topmost", self._aot_var.get())
+                except tk.TclError:
+                    pass
 
             # Apply floating widget toggle live
             if self._widget_var.get() and not self._widget_win:
                 self._create_floating_widget()
             elif not self._widget_var.get() and self._widget_win:
                 self._destroy_floating_widget()
+
+            # Breathing circle widget settings
+            self.config["breathing_widget_enabled"] = self._breath_enabled_var.get()
+            for key, spin, lo in [
+                ("breathing_widget_inhale", self._breath_inhale_spin, 1),
+                ("breathing_widget_hold_in", self._breath_hold_in_spin, 0),
+                ("breathing_widget_exhale", self._breath_exhale_spin, 1),
+                ("breathing_widget_hold_out", self._breath_hold_out_spin, 0),
+            ]:
+                try:
+                    self.config[key] = max(lo, int(spin.get()))
+                except ValueError:
+                    pass
+            try:
+                self.config["breathing_widget_size"] = max(60, int(self._breath_size_spin.get()))
+            except ValueError:
+                pass
+            try:
+                self.config["breathing_widget_alpha"] = max(0.05, min(1.0, int(self._breath_alpha_spin.get()) / 100))
+            except ValueError:
+                pass
+            self.config["breathing_widget_bg"] = self._breath_bg_var.get()
+            self.config["breathing_widget_click_through"] = self._breath_ct_var.get()
+
+            # Apply breathing widget toggle live (recreate to pick up size/bg/alpha changes)
+            if self._breath_enabled_var.get():
+                self._destroy_breathing_widget()
+                self._create_breathing_widget()
+            elif self._breath_win:
+                self._destroy_breathing_widget()
 
             # Apply theme if changed
             apply_theme(self.config["theme"])
@@ -3033,6 +3182,22 @@ class ScreenBreakApp:
         self._guided_eye_var.set(dc["guided_eye_exercises"])
         self._breathing_var.set(dc["breathing_exercises"])
         self._desk_var.set(dc["desk_exercises"])
+        self._aot_var.set(dc["status_always_on_top"])
+
+        # Reset breathing widget controls
+        self._breath_enabled_var.set(dc["breathing_widget_enabled"])
+        for spin, key in [
+            (self._breath_inhale_spin, "breathing_widget_inhale"),
+            (self._breath_hold_in_spin, "breathing_widget_hold_in"),
+            (self._breath_exhale_spin, "breathing_widget_exhale"),
+            (self._breath_hold_out_spin, "breathing_widget_hold_out"),
+        ]:
+            spin.delete(0, "end");  spin.insert(0, str(dc[key]))
+        self._breath_size_spin.delete(0, "end");  self._breath_size_spin.insert(0, str(dc["breathing_widget_size"]))
+        self._breath_alpha_spin.delete(0, "end");  self._breath_alpha_spin.insert(0, str(int(dc["breathing_widget_alpha"] * 100)))
+        self._breath_bg_var.set(dc["breathing_widget_bg"])
+        self._breath_ct_var.set(dc["breathing_widget_click_through"])
+        self._destroy_breathing_widget()
 
         # Reset scheduled breaks
         for row in list(self._brk_rows):
@@ -3280,20 +3445,19 @@ class ScreenBreakApp:
     def _show_startup(self):
         ov = tk.Toplevel(self.root)
         ov.overrideredirect(True);  ov.attributes("-topmost", True)
-        ov.configure(bg=C_CARD);  self._centre(ov, 440, 160)
+        ov.configure(bg=C_CARD);  self._centre(ov, 400, 150)
         if IS_MAC: ov.lift()
 
-        tk.Label(ov, text="✓  Screen Break is running", font=(FONT, 13, "bold"),
-                 fg=C_ACCENT2, bg=C_CARD).pack(pady=(18, 4))
+        tk.Label(ov, text="Screen Break is running", font=(FONT, 14, "bold"),
+                 fg=C_ACCENT2, bg=C_CARD).pack(pady=(20, 6))
 
-        detail = ("A clock will appear top-right ~1 min before each break.\n"
-                  f"Settings in {'menu bar' if IS_MAC else 'system tray'} → right-click.\n"
-                  "Click anywhere to dismiss this.")
-        tk.Label(ov, text=detail, font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD,
-                 justify="center").pack(pady=(0, 4))
+        tk.Label(ov, text="Breaks appear automatically. A clock icon\nwill show in the corner before each one.",
+                 font=(FONT, 9), fg=C_TEXT_DIM, bg=C_CARD,
+                 justify="center").pack(pady=(0, 8))
 
-        tk.Label(ov, text=f"Times are local ({datetime.datetime.now().astimezone().tzinfo})",
-                 font=(FONT, 8), fg=C_TEXT_MUT, bg=C_CARD).pack(pady=(0, 8))
+        tray = "menu bar" if IS_MAC else "system tray"
+        tk.Label(ov, text=f"{tray} > right-click for settings",
+                 font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD).pack(pady=(0, 14))
 
         # Click anywhere to dismiss
         def dismiss(e=None):
@@ -3523,6 +3687,393 @@ class ScreenBreakApp:
                 pass
             self._widget_win = None
             self._widget_label = None
+
+    # ━━━ Breathing Circle Widget ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    _BREATH_CHROMA = (1, 1, 1)  # RGB tuple used as transparent key
+
+    # Original teal palette — 6 bands from dark outer glow to bright core
+    _BREATH_TEAL = [
+        (13, 61, 61),    # outermost  #0d3d3d
+        (10, 92, 82),    #            #0a5c52
+        (15, 118, 110),  #            #0f766e
+        (16, 153, 142),  #            #10998e
+        (20, 184, 166),  #            #14b8a6
+        (45, 212, 191),  # core       #2dd4bf
+    ]
+    _BREATH_RING_STEP = 0.18  # radius multiplier increment per ring
+
+    def _create_breathing_widget(self) -> None:
+        """Create an always-on-top breathing circle widget."""
+        if self._breath_win:
+            return
+
+        size = self.config.get("breathing_widget_size", 120)
+        bg_mode = self.config.get("breathing_widget_bg", "transparent")
+        alpha = self.config.get("breathing_widget_alpha", 0.7)
+        win_w = size + 20
+        win_h = size + 20
+
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+
+        # Decide rendering path: per-pixel alpha (Windows transparent) or canvas
+        self._breath_use_layered = False
+        if bg_mode == "transparent" and IS_WIN:
+            # Per-pixel alpha via UpdateLayeredWindow — no -transparentcolor needed
+            win.configure(bg="black")
+            self._breath_use_layered = True
+            self._breath_bg_rgb = (0, 0, 0)  # unused for layered rendering
+        elif bg_mode == "transparent":
+            # Non-Windows fallback: chroma key (has aliased edges)
+            chroma_hex = "#%02x%02x%02x" % self._BREATH_CHROMA
+            win.configure(bg=chroma_hex)
+            try:
+                win.attributes("-transparentcolor", chroma_hex)
+                win.attributes("-alpha", max(0.05, min(1.0, alpha)))
+            except tk.TclError:
+                win.configure(bg="#111827")
+                bg_mode = "dark"
+            self._breath_bg_rgb = self._BREATH_CHROMA
+        if bg_mode == "teal":
+            win.configure(bg="#0d3d3d")
+            self._breath_bg_rgb = (13, 61, 61)
+            try:
+                win.attributes("-alpha", max(0.05, min(1.0, alpha)))
+            except tk.TclError:
+                pass
+        elif bg_mode == "dark":
+            win.configure(bg="#111827")
+            self._breath_bg_rgb = (17, 24, 39)
+            try:
+                win.attributes("-alpha", max(0.05, min(1.0, alpha)))
+            except tk.TclError:
+                pass
+
+        # Position
+        pos = self.config.get("breathing_widget_position")
+        sw = win.winfo_screenwidth()
+        sh = win.winfo_screenheight()
+        if pos and isinstance(pos, list) and len(pos) == 2:
+            x, y = int(pos[0]), int(pos[1])
+            x = max(0, min(x, sw - win_w))
+            y = max(0, min(y, sh - win_h))
+        else:
+            x, y = sw - win_w - 20, sh - win_h - 100
+        win.geometry(f"{win_w}x{win_h}+{x}+{y}")
+
+        # Canvas (used for rendering in non-layered mode, events in all modes)
+        canvas_bg = "black" if self._breath_use_layered else win.cget("bg")
+        canvas = tk.Canvas(win, width=win_w, height=win_h,
+                           bg=canvas_bg, highlightthickness=0)
+        canvas.pack(fill="both", expand=True)
+
+        self._breath_win = win
+        self._breath_canvas = canvas
+        self._breath_photo = None
+        self._breath_img_id = canvas.create_image(win_w // 2, win_h // 2, anchor="center")
+        self._breath_win_w = win_w
+        self._breath_win_h = win_h
+
+        for widget in (win, canvas):
+            widget.bind("<Button-1>", self._breath_press)
+            widget.bind("<B1-Motion>", self._breath_drag)
+            widget.bind("<ButtonRelease-1>", self._breath_release)
+            widget.bind("<Button-3>", self._breath_menu)
+
+        # HWND setup (Windows)
+        self._breath_hwnd = None
+        self._breath_ct_active = False
+        if IS_WIN:
+            try:
+                win.update_idletasks()
+                GA_ROOT = 2
+                self._breath_hwnd = ctypes.windll.user32.GetAncestor(
+                    win.winfo_id(), GA_ROOT)
+            except Exception:
+                self._breath_hwnd = None
+
+        # For layered mode, set WS_EX_LAYERED on the HWND
+        if self._breath_use_layered and self._breath_hwnd:
+            try:
+                GWL_EXSTYLE = -20
+                WS_EX_LAYERED = 0x00080000
+                style = ctypes.windll.user32.GetWindowLongW(self._breath_hwnd, GWL_EXSTYLE)
+                style |= WS_EX_LAYERED
+                ctypes.windll.user32.SetWindowLongW(self._breath_hwnd, GWL_EXSTYLE, style)
+            except Exception:
+                self._breath_use_layered = False
+
+        # Click-through
+        if self._breath_hwnd and self.config.get("breathing_widget_click_through", True):
+            self._breath_set_click_through(True)
+
+        self._breath_running = True
+        self._animate_breathing_widget()
+        self._breath_poll_ctrl()
+
+    def _breath_set_click_through(self, enable: bool) -> None:
+        """Toggle WS_EX_TRANSPARENT on the breathing widget (Windows)."""
+        if not self._breath_hwnd:
+            return
+        try:
+            GWL_EXSTYLE = -20
+            WS_EX_TRANSPARENT = 0x00000020
+            WS_EX_LAYERED = 0x00080000
+            style = ctypes.windll.user32.GetWindowLongW(self._breath_hwnd, GWL_EXSTYLE)
+            if enable:
+                style |= WS_EX_TRANSPARENT | WS_EX_LAYERED
+            else:
+                style &= ~WS_EX_TRANSPARENT
+            ctypes.windll.user32.SetWindowLongW(self._breath_hwnd, GWL_EXSTYLE, style)
+            self._breath_ct_active = enable
+        except Exception:
+            pass
+
+    def _breath_poll_ctrl(self) -> None:
+        """Poll Ctrl key independently of animation (runs even when paused)."""
+        if not self._breath_win or not self._breath_hwnd:
+            return
+        try:
+            if not self._breath_win.winfo_exists():
+                return
+        except tk.TclError:
+            return
+        if self.config.get("breathing_widget_click_through", True):
+            try:
+                VK_CONTROL = 0x11
+                ctrl_held = (ctypes.windll.user32.GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0
+                if ctrl_held and self._breath_ct_active:
+                    self._breath_set_click_through(False)
+                elif not ctrl_held and not self._breath_ct_active and not self._breath_dragged:
+                    self._breath_set_click_through(True)
+            except Exception:
+                pass
+        try:
+            self._breath_win.after(50, self._breath_poll_ctrl)
+        except tk.TclError:
+            pass
+
+    def _breath_draw_rings(self, img_w: int, img_h: int, core_r: float,
+                           bg: tuple[int, ...]) -> Image.Image:
+        """Draw the 6 teal rings at a given resolution on the specified background."""
+        img = Image.new("RGB", (img_w, img_h), bg)
+        draw = ImageDraw.Draw(img)
+        cx, cy = img_w // 2, img_h // 2
+        n = len(self._BREATH_TEAL)
+        step = self._BREATH_RING_STEP
+        for i, rgb in enumerate(self._BREATH_TEAL):
+            factor = 1.0 + (n - 1 - i) * step
+            r = core_r * factor
+            draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=rgb)
+        return img
+
+    def _breath_update_layered_window(self, bgra_bytes: bytes, w: int, h: int) -> None:
+        """Send premultiplied BGRA pixels to the window via UpdateLayeredWindow."""
+        if not self._breath_hwnd:
+            return
+        try:
+            user32 = ctypes.windll.user32
+            gdi32 = ctypes.windll.gdi32
+            hdc_screen = user32.GetDC(0)
+            hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
+
+            # BITMAPINFOHEADER (40 bytes)
+            class BMI(ctypes.Structure):
+                _fields_ = [
+                    ("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
+                    ("biHeight", ctypes.c_int32), ("biPlanes", ctypes.c_uint16),
+                    ("biBitCount", ctypes.c_uint16), ("biCompression", ctypes.c_uint32),
+                    ("biSizeImage", ctypes.c_uint32), ("biXPM", ctypes.c_int32),
+                    ("biYPM", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32),
+                    ("biClrImportant", ctypes.c_uint32),
+                ]
+            bmi = BMI(40, w, -h, 1, 32, 0, 0, 0, 0, 0, 0)  # -h = top-down
+
+            ppv = ctypes.c_void_p()
+            hbmp = gdi32.CreateDIBSection(hdc_mem, ctypes.byref(bmi), 0,
+                                          ctypes.byref(ppv), None, 0)
+            if not hbmp or not ppv:
+                gdi32.DeleteDC(hdc_mem)
+                user32.ReleaseDC(0, hdc_screen)
+                return
+
+            ctypes.memmove(ppv, bgra_bytes, len(bgra_bytes))
+            old = gdi32.SelectObject(hdc_mem, hbmp)
+
+            alpha_byte = max(1, min(255, int(
+                self.config.get("breathing_widget_alpha", 0.7) * 255)))
+            # BLENDFUNCTION: BlendOp=AC_SRC_OVER(0), Flags=0, SrcAlpha, AlphaFmt=AC_SRC_ALPHA(1)
+            blend = (ctypes.c_ubyte * 4)(0, 0, alpha_byte, 1)
+            sz = (ctypes.c_long * 2)(w, h)
+            pt_src = (ctypes.c_long * 2)(0, 0)
+
+            user32.UpdateLayeredWindow(
+                self._breath_hwnd, hdc_screen, None, sz,
+                hdc_mem, pt_src, 0, blend, 2)  # ULW_ALPHA = 2
+
+            gdi32.SelectObject(hdc_mem, old)
+            gdi32.DeleteObject(hbmp)
+            gdi32.DeleteDC(hdc_mem)
+            user32.ReleaseDC(0, hdc_screen)
+        except Exception:
+            pass
+
+    def _animate_breathing_widget(self) -> None:
+        """60fps animation — 6-ring teal circle, per-pixel alpha or canvas rendering."""
+        if not self._breath_running or not self._breath_win:
+            return
+        try:
+            if not self._breath_win.winfo_exists():
+                self._breath_win = None
+                return
+        except tk.TclError:
+            self._breath_win = None
+            return
+
+        # --- Compute breath factor (0=contracted, 1=expanded) ---
+        inhale_t = max(1, self.config.get("breathing_widget_inhale", 4))
+        hold_in_t = max(0, self.config.get("breathing_widget_hold_in", 0))
+        exhale_t = max(1, self.config.get("breathing_widget_exhale", 4))
+        hold_out_t = max(0, self.config.get("breathing_widget_hold_out", 0))
+        total_cycle = inhale_t + hold_in_t + exhale_t + hold_out_t
+
+        t = time.time() % total_cycle
+        if t < inhale_t:
+            progress = t / inhale_t
+            breath = 0.5 - 0.5 * math.cos(math.pi * progress)
+        elif t < inhale_t + hold_in_t:
+            breath = 1.0
+        elif t < inhale_t + hold_in_t + exhale_t:
+            progress = (t - inhale_t - hold_in_t) / exhale_t
+            breath = 0.5 + 0.5 * math.cos(math.pi * progress)
+        else:
+            breath = 0.0
+
+        # --- Common geometry ---
+        win_w = self._breath_win_w
+        win_h = self._breath_win_h
+        n = len(self._BREATH_TEAL)
+        step = self._BREATH_RING_STEP
+        outermost_factor = 1.0 + (n - 1) * step
+
+        if self._breath_use_layered:
+            # --- Per-pixel alpha path (1x — smooth edges via alpha blur) ---
+            half = min(win_w, win_h) / 2
+            max_r = (half - 4) / outermost_factor
+            min_r = max_r * 0.33
+            core_r = min_r + (max_r - min_r) * breath
+
+            outer_rgb = self._BREATH_TEAL[0]
+            rgb_img = self._breath_draw_rings(win_w, win_h, core_r, outer_rgb)
+
+            # Alpha mask: solid circle + Gaussian blur for soft edge
+            cx, cy = win_w // 2, win_h // 2
+            outermost_r = core_r * outermost_factor
+            alpha_img = Image.new("L", (win_w, win_h), 0)
+            ImageDraw.Draw(alpha_img).ellipse(
+                [cx - outermost_r, cy - outermost_r,
+                 cx + outermost_r, cy + outermost_r], fill=255)
+            alpha_img = alpha_img.filter(ImageFilter.GaussianBlur(radius=2.0))
+
+            # Premultiply: channel = channel * alpha / 255
+            r_ch, g_ch, b_ch = rgb_img.split()
+            r_pm = ImageChops.multiply(r_ch, alpha_img)
+            g_pm = ImageChops.multiply(g_ch, alpha_img)
+            b_pm = ImageChops.multiply(b_ch, alpha_img)
+
+            # BGRA byte order for Windows
+            bgra = Image.merge("RGBA", (b_pm, g_pm, r_pm, alpha_img))
+            self._breath_update_layered_window(bgra.tobytes(), win_w, win_h)
+        else:
+            # --- Canvas path (2x supersample for dark/teal backgrounds) ---
+            scale = 2
+            img_w, img_h = win_w * scale, win_h * scale
+            half = min(img_w, img_h) / 2
+            max_r = (half - 4 * scale) / outermost_factor
+            min_r = max_r * 0.33
+            core_r = min_r + (max_r - min_r) * breath
+            rgb_img = self._breath_draw_rings(img_w, img_h, core_r, self._breath_bg_rgb)
+            rgb_img = rgb_img.filter(ImageFilter.GaussianBlur(radius=1.0))
+            rgb_img = rgb_img.resize((win_w, win_h), Image.LANCZOS)
+            try:
+                self._breath_photo = ImageTk.PhotoImage(rgb_img)
+                self._breath_canvas.itemconfig(self._breath_img_id, image=self._breath_photo)
+            except tk.TclError:
+                return
+
+        # Schedule next frame (~60fps)
+        try:
+            self._breath_win.after(16, self._animate_breathing_widget)
+        except tk.TclError:
+            self._breath_running = False
+
+    def _breath_press(self, event) -> None:
+        """Record mouse position for drag."""
+        self._breath_drag_x = event.x_root - self._breath_win.winfo_x()
+        self._breath_drag_y = event.y_root - self._breath_win.winfo_y()
+        self._breath_dragged = False
+
+    def _breath_drag(self, event) -> None:
+        """Move breathing widget with mouse."""
+        x = event.x_root - self._breath_drag_x
+        y = event.y_root - self._breath_drag_y
+        self._breath_win.geometry(f"+{x}+{y}")
+        self._breath_dragged = True
+
+    def _breath_release(self, event) -> None:
+        """Save position if dragged, then re-enable click-through."""
+        if self._breath_dragged:
+            x = self._breath_win.winfo_x()
+            y = self._breath_win.winfo_y()
+            self.config["breathing_widget_position"] = [x, y]
+            save_config(self.config)
+            self._breath_dragged = False
+            # Re-enable click-through after drag completes
+            if self._breath_hwnd and self.config.get("breathing_widget_click_through", True):
+                self._breath_set_click_through(True)
+
+    def _breath_menu(self, event) -> None:
+        """Right-click context menu on breathing widget."""
+        menu = tk.Menu(self._breath_win, tearoff=0)
+        if self._breath_running:
+            menu.add_command(label="Pause", command=self._breath_toggle_pause)
+        else:
+            menu.add_command(label="Resume", command=self._breath_toggle_pause)
+        menu.add_command(label="Settings",
+                         command=lambda: self.root.after(0, self._show_status_window))
+        menu.add_separator()
+        menu.add_command(label="Close",
+                         command=lambda: self.root.after(0, self._destroy_breathing_widget))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _breath_toggle_pause(self) -> None:
+        """Toggle breathing animation pause/resume."""
+        if self._breath_running:
+            self._breath_running = False
+        else:
+            self._breath_running = True
+            self._animate_breathing_widget()
+
+    def _destroy_breathing_widget(self) -> None:
+        """Tear down the breathing circle widget."""
+        self._breath_running = False
+        if self._breath_hwnd:
+            self._breath_set_click_through(False)
+            self._breath_hwnd = None
+        self._breath_ct_active = False
+        if self._breath_win:
+            try:
+                self._breath_win.destroy()
+            except tk.TclError:
+                pass
+            self._breath_win = None
+            self._breath_canvas = None
+            self._breath_photo = None
 
     # ━━━ System Tray ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 

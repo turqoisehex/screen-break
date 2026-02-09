@@ -43,7 +43,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pystray Pillow
+          pip install pyinstaller pystray Pillow screeninfo
 
       - name: Build with PyInstaller
         run: pyinstaller screen_break.spec
@@ -64,23 +64,21 @@ jobs:
         with:
           path: artifacts
 
-      - name: Rename artifacts for release
+      - name: Flatten artifacts for release
         run: |
-          mv artifacts/ScreenBreak-Windows.exe/ScreenBreak.exe artifacts/ScreenBreak-Windows.exe.tmp
-          mv artifacts/ScreenBreak-Windows.exe.tmp artifacts/ScreenBreak-Windows.exe
-          mv artifacts/ScreenBreak-macOS/ScreenBreak artifacts/ScreenBreak-macOS.tmp
-          mv artifacts/ScreenBreak-macOS.tmp artifacts/ScreenBreak-macOS
-          mv artifacts/ScreenBreak-Linux/ScreenBreak artifacts/ScreenBreak-Linux.tmp
-          mv artifacts/ScreenBreak-Linux.tmp artifacts/ScreenBreak-Linux
-          ls -la artifacts/
+          mkdir -p release
+          cp artifacts/ScreenBreak-Windows.exe/ScreenBreak.exe release/ScreenBreak-Windows.exe
+          cp artifacts/ScreenBreak-macOS/ScreenBreak release/ScreenBreak-macOS
+          cp artifacts/ScreenBreak-Linux/ScreenBreak release/ScreenBreak-Linux
+          ls -la release/
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/ScreenBreak-Windows.exe
-            artifacts/ScreenBreak-macOS
-            artifacts/ScreenBreak-Linux
+            release/ScreenBreak-Windows.exe
+            release/ScreenBreak-macOS
+            release/ScreenBreak-Linux
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
