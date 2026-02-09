@@ -2,6 +2,22 @@
 
 A healthy break reminder app that runs in your system tray. Reminds you to rest your eyes, stretch, and take regular breaks throughout your workday.
 
+## Install
+
+Download the latest release for your platform:
+
+**[Download Screen Break](../../releases/latest)**
+
+| Platform | File |
+|----------|------|
+| Windows | `ScreenBreak-Windows.exe` |
+| macOS | `ScreenBreak-macOS` |
+| Linux | `ScreenBreak-Linux` |
+
+Run the downloaded file — the app appears in your system tray. Right-click the tray icon for settings.
+
+> **From source:** Requires Python 3.10+. `pip install pystray Pillow screeninfo` then `python screen_break.py`.
+
 ## Features
 
 ### Core Features
@@ -33,36 +49,6 @@ A healthy break reminder app that runs in your system tray. Reminds you to rest 
 - **Hydration Tracking** — Water intake reminders with daily goal tracking
 - **Focus Sessions** — Pomodoro-style timer with task naming
 - **Daily/Weekly Reports** — Visual charts showing your break history
-
-## Installation
-
-### Windows (Recommended)
-
-1. Download `ScreenBreak.exe` from the [Releases](../../releases) page
-2. Run it — the app appears in your system tray
-3. Right-click the tray icon to access settings
-
-### From Source
-
-Requires Python 3.10+
-
-```bash
-# Clone the repo
-git clone https://github.com/turqoisehex/screen-break.git
-cd screen-break
-
-# Install dependencies
-pip install pystray Pillow
-
-# Optional: for multi-monitor support
-pip install screeninfo
-
-# Run
-python screen_break.py
-
-# Or run with short intervals for testing
-python screen_break.py --test
-```
 
 ## Usage
 
