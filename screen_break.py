@@ -575,10 +575,10 @@ DEFAULT_CONFIG = {
     "status_always_on_top": False,    # Keep Settings window above other windows
     # Breathing circle widget (always-on-top ambient breathing guide)
     "breathing_widget_enabled": False,
-    "breathing_widget_inhale": 4,     # Inhale duration in seconds
-    "breathing_widget_hold_in": 0,    # Hold at peak in seconds
-    "breathing_widget_exhale": 4,     # Exhale duration in seconds
-    "breathing_widget_hold_out": 0,   # Hold at bottom in seconds
+    "breathing_widget_inhale": 4.0,   # Inhale duration in seconds (float)
+    "breathing_widget_hold_in": 0.0,  # Hold at peak in seconds (float)
+    "breathing_widget_exhale": 4.0,   # Exhale duration in seconds (float)
+    "breathing_widget_hold_out": 0.0, # Hold at bottom in seconds (float)
     "breathing_widget_alpha": 0.7,    # Window opacity 0.05-1.0
     "breathing_widget_bg": "transparent",  # "transparent", "dark", "teal"
     "breathing_widget_size": 120,     # Circle diameter in px (60+, no upper limit)
@@ -965,6 +965,12 @@ class ScreenBreakApp:
         self._breath_drag_y = 0
         self._breath_hwnd = None
         self._breath_ct_active = False  # click-through currently on
+        # Cached GDI resources for layered window rendering
+        self._breath_hdc_screen = None
+        self._breath_hdc_mem = None
+        self._breath_hbmp = None
+        self._breath_ppv = None
+        self._breath_old_bmp = None
 
         self.last_mini_reminder = datetime.datetime.now()
         self._mini_win = None
@@ -2767,32 +2773,32 @@ class ScreenBreakApp:
 
         bwrow1 = tk.Frame(featf, bg=C_BG);  bwrow1.pack(fill="x", pady=1, padx=(20, 0))
         tk.Label(bwrow1, text="In:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
-        self._breath_inhale_spin = tk.Spinbox(bwrow1, from_=1, to=20, width=2,
-            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+        self._breath_inhale_spin = tk.Spinbox(bwrow1, from_=1, to=20, width=4, increment=0.5,
+            format="%.1f", font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
         self._breath_inhale_spin.pack(side="left");  self._breath_inhale_spin.delete(0, "end")
-        self._breath_inhale_spin.insert(0, str(self.config.get("breathing_widget_inhale", 4)))
+        self._breath_inhale_spin.insert(0, str(float(self.config.get("breathing_widget_inhale", 4))))
         tk.Label(bwrow1, text="s Hold:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
-        self._breath_hold_in_spin = tk.Spinbox(bwrow1, from_=0, to=15, width=2,
-            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+        self._breath_hold_in_spin = tk.Spinbox(bwrow1, from_=0, to=15, width=4, increment=0.5,
+            format="%.1f", font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
         self._breath_hold_in_spin.pack(side="left");  self._breath_hold_in_spin.delete(0, "end")
-        self._breath_hold_in_spin.insert(0, str(self.config.get("breathing_widget_hold_in", 0)))
+        self._breath_hold_in_spin.insert(0, str(float(self.config.get("breathing_widget_hold_in", 0))))
         tk.Label(bwrow1, text="s", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
 
         bwrow1b = tk.Frame(featf, bg=C_BG);  bwrow1b.pack(fill="x", pady=1, padx=(20, 0))
         tk.Label(bwrow1b, text="Out:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
-        self._breath_exhale_spin = tk.Spinbox(bwrow1b, from_=1, to=20, width=2,
-            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+        self._breath_exhale_spin = tk.Spinbox(bwrow1b, from_=1, to=20, width=4, increment=0.5,
+            format="%.1f", font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
         self._breath_exhale_spin.pack(side="left");  self._breath_exhale_spin.delete(0, "end")
-        self._breath_exhale_spin.insert(0, str(self.config.get("breathing_widget_exhale", 4)))
+        self._breath_exhale_spin.insert(0, str(float(self.config.get("breathing_widget_exhale", 4))))
         tk.Label(bwrow1b, text="s Hold:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
-        self._breath_hold_out_spin = tk.Spinbox(bwrow1b, from_=0, to=15, width=2,
-            font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
+        self._breath_hold_out_spin = tk.Spinbox(bwrow1b, from_=0, to=15, width=4, increment=0.5,
+            format="%.1f", font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
         self._breath_hold_out_spin.pack(side="left");  self._breath_hold_out_spin.delete(0, "end")
-        self._breath_hold_out_spin.insert(0, str(self.config.get("breathing_widget_hold_out", 0)))
+        self._breath_hold_out_spin.insert(0, str(float(self.config.get("breathing_widget_hold_out", 0))))
         tk.Label(bwrow1b, text="s", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
 
         bwrow2 = tk.Frame(featf, bg=C_BG);  bwrow2.pack(fill="x", pady=1, padx=(20, 0))
@@ -3108,7 +3114,7 @@ class ScreenBreakApp:
                 ("breathing_widget_hold_out", self._breath_hold_out_spin, 0),
             ]:
                 try:
-                    self.config[key] = max(lo, int(spin.get()))
+                    self.config[key] = max(lo, round(float(spin.get()), 1))
                 except ValueError:
                     pass
             try:
@@ -3869,17 +3875,13 @@ class ScreenBreakApp:
             draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=rgb)
         return img
 
-    def _breath_update_layered_window(self, bgra_bytes: bytes, w: int, h: int) -> None:
-        """Send premultiplied BGRA pixels to the window via UpdateLayeredWindow."""
-        if not self._breath_hwnd:
-            return
+    def _breath_init_gdi(self, w: int, h: int) -> bool:
+        """Create and cache GDI resources for layered window rendering."""
+        self._breath_free_gdi()
         try:
             user32 = ctypes.windll.user32
             gdi32 = ctypes.windll.gdi32
-            hdc_screen = user32.GetDC(0)
-            hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
 
-            # BITMAPINFOHEADER (40 bytes)
             class BMI(ctypes.Structure):
                 _fields_ = [
                     ("biSize", ctypes.c_uint32), ("biWidth", ctypes.c_int32),
@@ -3889,34 +3891,67 @@ class ScreenBreakApp:
                     ("biYPM", ctypes.c_int32), ("biClrUsed", ctypes.c_uint32),
                     ("biClrImportant", ctypes.c_uint32),
                 ]
-            bmi = BMI(40, w, -h, 1, 32, 0, 0, 0, 0, 0, 0)  # -h = top-down
+            bmi = BMI(40, w, -h, 1, 32, 0, 0, 0, 0, 0, 0)
 
+            hdc_screen = user32.GetDC(0)
+            hdc_mem = gdi32.CreateCompatibleDC(hdc_screen)
             ppv = ctypes.c_void_p()
             hbmp = gdi32.CreateDIBSection(hdc_mem, ctypes.byref(bmi), 0,
                                           ctypes.byref(ppv), None, 0)
             if not hbmp or not ppv:
                 gdi32.DeleteDC(hdc_mem)
                 user32.ReleaseDC(0, hdc_screen)
-                return
+                return False
 
-            ctypes.memmove(ppv, bgra_bytes, len(bgra_bytes))
-            old = gdi32.SelectObject(hdc_mem, hbmp)
+            self._breath_hdc_screen = hdc_screen
+            self._breath_hdc_mem = hdc_mem
+            self._breath_hbmp = hbmp
+            self._breath_ppv = ppv
+            self._breath_old_bmp = gdi32.SelectObject(hdc_mem, hbmp)
+            return True
+        except Exception:
+            return False
+
+    def _breath_free_gdi(self) -> None:
+        """Release cached GDI resources."""
+        try:
+            gdi32 = ctypes.windll.gdi32
+            user32 = ctypes.windll.user32
+            if self._breath_old_bmp and self._breath_hdc_mem:
+                gdi32.SelectObject(self._breath_hdc_mem, self._breath_old_bmp)
+            if self._breath_hbmp:
+                gdi32.DeleteObject(self._breath_hbmp)
+            if self._breath_hdc_mem:
+                gdi32.DeleteDC(self._breath_hdc_mem)
+            if self._breath_hdc_screen:
+                user32.ReleaseDC(0, self._breath_hdc_screen)
+        except Exception:
+            pass
+        self._breath_hdc_screen = None
+        self._breath_hdc_mem = None
+        self._breath_hbmp = None
+        self._breath_ppv = None
+        self._breath_old_bmp = None
+
+    def _breath_update_layered_window(self, bgra_bytes: bytes, w: int, h: int) -> None:
+        """Send BGRA pixels to the window via UpdateLayeredWindow (cached GDI)."""
+        if not self._breath_hwnd:
+            return
+        if not self._breath_ppv:
+            if not self._breath_init_gdi(w, h):
+                return
+        try:
+            ctypes.memmove(self._breath_ppv, bgra_bytes, len(bgra_bytes))
 
             alpha_byte = max(1, min(255, int(
                 self.config.get("breathing_widget_alpha", 0.7) * 255)))
-            # BLENDFUNCTION: BlendOp=AC_SRC_OVER(0), Flags=0, SrcAlpha, AlphaFmt=AC_SRC_ALPHA(1)
             blend = (ctypes.c_ubyte * 4)(0, 0, alpha_byte, 1)
             sz = (ctypes.c_long * 2)(w, h)
             pt_src = (ctypes.c_long * 2)(0, 0)
 
-            user32.UpdateLayeredWindow(
-                self._breath_hwnd, hdc_screen, None, sz,
-                hdc_mem, pt_src, 0, blend, 2)  # ULW_ALPHA = 2
-
-            gdi32.SelectObject(hdc_mem, old)
-            gdi32.DeleteObject(hbmp)
-            gdi32.DeleteDC(hdc_mem)
-            user32.ReleaseDC(0, hdc_screen)
+            ctypes.windll.user32.UpdateLayeredWindow(
+                self._breath_hwnd, self._breath_hdc_screen, None, sz,
+                self._breath_hdc_mem, pt_src, 0, blend, 2)
         except Exception:
             pass
 
@@ -3933,10 +3968,10 @@ class ScreenBreakApp:
             return
 
         # --- Compute breath factor (0=contracted, 1=expanded) ---
-        inhale_t = max(1, self.config.get("breathing_widget_inhale", 4))
-        hold_in_t = max(0, self.config.get("breathing_widget_hold_in", 0))
-        exhale_t = max(1, self.config.get("breathing_widget_exhale", 4))
-        hold_out_t = max(0, self.config.get("breathing_widget_hold_out", 0))
+        inhale_t = max(1.0, float(self.config.get("breathing_widget_inhale", 4)))
+        hold_in_t = max(0.0, float(self.config.get("breathing_widget_hold_in", 0)))
+        exhale_t = max(1.0, float(self.config.get("breathing_widget_exhale", 4)))
+        hold_out_t = max(0.0, float(self.config.get("breathing_widget_hold_out", 0)))
         total_cycle = inhale_t + hold_in_t + exhale_t + hold_out_t
 
         t = time.time() % total_cycle
@@ -3959,39 +3994,32 @@ class ScreenBreakApp:
         outermost_factor = 1.0 + (n - 1) * step
 
         if self._breath_use_layered:
-            # --- Per-pixel alpha path (1x — smooth edges via alpha blur) ---
+            # --- Per-pixel alpha path (1x RGBA — no separate alpha mask) ---
             half = min(win_w, win_h) / 2
             max_r = (half - 4) / outermost_factor
             min_r = max_r * 0.33
             core_r = min_r + (max_r - min_r) * breath
 
-            outer_rgb = self._BREATH_TEAL[0]
-            rgb_img = self._breath_draw_rings(win_w, win_h, core_r, outer_rgb)
-
-            # Alpha mask: solid circle + Gaussian blur for soft edge
+            # Draw rings directly on transparent RGBA
+            rgba = Image.new("RGBA", (win_w, win_h), (0, 0, 0, 0))
+            draw = ImageDraw.Draw(rgba)
             cx, cy = win_w // 2, win_h // 2
-            outermost_r = core_r * outermost_factor
-            alpha_img = Image.new("L", (win_w, win_h), 0)
-            ImageDraw.Draw(alpha_img).ellipse(
-                [cx - outermost_r, cy - outermost_r,
-                 cx + outermost_r, cy + outermost_r], fill=255)
-            alpha_img = alpha_img.filter(ImageFilter.GaussianBlur(radius=2.0))
+            for i, rgb in enumerate(self._BREATH_TEAL):
+                factor = 1.0 + (n - 1 - i) * step
+                r = core_r * factor
+                draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=rgb + (255,))
 
-            # Premultiply: channel = channel * alpha / 255
-            r_ch, g_ch, b_ch = rgb_img.split()
-            r_pm = ImageChops.multiply(r_ch, alpha_img)
-            g_pm = ImageChops.multiply(g_ch, alpha_img)
-            b_pm = ImageChops.multiply(b_ch, alpha_img)
-
-            # BGRA byte order for Windows
-            bgra = Image.merge("RGBA", (b_pm, g_pm, r_pm, alpha_img))
+            # All pixels are either (R,G,B,255) or (0,0,0,0) so premultiply
+            # is identity — just swap R<->B for BGRA byte order
+            r_ch, g_ch, b_ch, a_ch = rgba.split()
+            bgra = Image.merge("RGBA", (b_ch, g_ch, r_ch, a_ch))
             self._breath_update_layered_window(bgra.tobytes(), win_w, win_h)
         else:
             # --- Canvas path (2x supersample for dark/teal backgrounds) ---
             scale = 2
             img_w, img_h = win_w * scale, win_h * scale
             half = min(img_w, img_h) / 2
-            max_r = (half - 4 * scale) / outermost_factor
+            max_r = (half - 8 * scale) / outermost_factor
             min_r = max_r * 0.33
             core_r = min_r + (max_r - min_r) * breath
             rgb_img = self._breath_draw_rings(img_w, img_h, core_r, self._breath_bg_rgb)
@@ -4062,6 +4090,7 @@ class ScreenBreakApp:
     def _destroy_breathing_widget(self) -> None:
         """Tear down the breathing circle widget."""
         self._breath_running = False
+        self._breath_free_gdi()
         if self._breath_hwnd:
             self._breath_set_click_through(False)
             self._breath_hwnd = None
