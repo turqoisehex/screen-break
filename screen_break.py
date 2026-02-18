@@ -938,6 +938,8 @@ class ScreenBreakApp:
         self.overlay_up = False;  self.warning_up = False
         self.current_overlay = None;  self.warning_window = None
         self.pending_break = None;  self.snooze_until = None
+        self._mini_ind = None;  self._mini_ov = None;  self._mini_done_notif = None
+        self._break_rem = 0
         self.last_eye_rest = datetime.datetime.now()
         self.last_micro    = datetime.datetime.now()
         self.last_any_break = datetime.datetime.now()
@@ -1697,9 +1699,158 @@ class ScreenBreakApp:
         b.pack(side="left", padx=6)
         return b
 
+    # ── Minimize / restore break overlay ─────────────────
+    def _minimize_break(self, ov: tk.Toplevel, remaining: int,
+                        total: int, restore_cb: Callable) -> None:
+        """Hide break overlay and show a small countdown indicator top-right."""
+        try:
+            ov.withdraw()
+        except tk.TclError:
+            return
+
+        self._mini_ov = ov
+        self._mini_restore_cb = restore_cb
+        self._mini_rem = remaining
+        self._mini_total = total
+
+        # Small indicator window (top-right corner)
+        ind = tk.Toplevel(self.root)
+        ind.overrideredirect(True);  ind.attributes("-topmost", True)
+        try:
+            ind.attributes("-alpha", 0.92)
+        except tk.TclError:
+            pass
+        ind.configure(bg=C_CARD)
+        sw = ind.winfo_screenwidth()
+        ind.geometry(f"180x50+{sw - 200}+{18}")
+
+        f = tk.Frame(ind, bg=C_CARD, padx=10, pady=6)
+        f.pack(fill="both", expand=True)
+
+        self._mini_cd_var = tk.StringVar(value=self._fmt_mm_ss(remaining))
+        tk.Label(f, textvariable=self._mini_cd_var,
+                 font=(MONO, 16, "bold"), fg=C_CD, bg=C_CARD).pack(side="left")
+        tk.Label(f, text="  on break", font=(FONT, 9), fg=C_TEXT_MUT,
+                 bg=C_CARD).pack(side="left", padx=(4, 0))
+
+        ind.bind("<Button-1>", lambda e: self._restore_break())
+        ind.configure(cursor="hand2")
+
+        self._mini_ind = ind
+        self._mini_countdown_tick()
+
+    def _fmt_mm_ss(self, sec: int) -> str:
+        m, s = divmod(max(0, sec), 60)
+        return f"{m}:{s:02d}"
+
+    def _mini_countdown_tick(self) -> None:
+        """Tick the minimized-break countdown indicator."""
+        if not self._mini_ind:
+            return
+        try:
+            if not self._mini_ind.winfo_exists():
+                return
+        except tk.TclError:
+            return
+
+        if self._mini_rem > 0:
+            self._mini_rem -= 1
+            self._mini_cd_var.set(self._fmt_mm_ss(self._mini_rem))
+            self._mini_ind.after(1000, self._mini_countdown_tick)
+        else:
+            # Time's up — show a "break done" notification
+            self._mini_cd_var.set("0:00")
+            self._show_break_done_notif()
+
+    def _show_break_done_notif(self) -> None:
+        """Replace the minimized indicator with a 'break complete' notification."""
+        # Destroy the small countdown indicator
+        if self._mini_ind:
+            try:
+                self._mini_ind.destroy()
+            except tk.TclError:
+                pass
+            self._mini_ind = None
+
+        # Play sound
+        if self.config.get("sound_enabled", True):
+            custom = self.config.get("custom_sound_path") if self.config.get("custom_sound_enabled") else None
+            play_sound("chime", custom)
+
+        notif = tk.Toplevel(self.root)
+        notif.overrideredirect(True);  notif.attributes("-topmost", True)
+        try:
+            notif.attributes("-alpha", 0.95)
+        except tk.TclError:
+            pass
+        notif.configure(bg=C_CARD)
+        sw = notif.winfo_screenwidth()
+        notif.geometry(f"260x80+{sw - 280}+{18}")
+
+        f = tk.Frame(notif, bg=C_CARD, padx=14, pady=10)
+        f.pack(fill="both", expand=True)
+
+        tk.Label(f, text="Break complete!", font=(FONT, 13, "bold"),
+                 fg=C_ACCENT2, bg=C_CARD).pack(anchor="w")
+        tk.Label(f, text="Click to finish  |  break overlay is ready",
+                 font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD).pack(anchor="w", pady=(2, 0))
+        notif.configure(cursor="hand2")
+
+        self._mini_done_notif = notif
+
+        def finish(e=None):
+            try:
+                notif.destroy()
+            except tk.TclError:
+                pass
+            self._mini_done_notif = None
+            self._restore_break()
+
+        notif.bind("<Button-1>", finish)
+        # Auto-dismiss after 30 seconds and restore overlay
+        notif.after(30000, finish)
+
+    def _restore_break(self) -> None:
+        """Bring back the hidden break overlay."""
+        # Clean up indicator / notification
+        for w in (self._mini_ind, getattr(self, "_mini_done_notif", None)):
+            if w:
+                try:
+                    w.destroy()
+                except tk.TclError:
+                    pass
+        self._mini_ind = None
+        self._mini_done_notif = None
+
+        restore_cb = getattr(self, "_mini_restore_cb", None)
+        ov = getattr(self, "_mini_ov", None)
+        if ov:
+            try:
+                if restore_cb:
+                    restore_cb()
+                ov.deiconify()
+                ov.attributes("-topmost", True)
+                ov.lift()
+                ov.focus_force()
+            except tk.TclError:
+                pass
+            self._mini_ov = None
+            self._mini_restore_cb = None
+
     def _dismiss(self, ov: tk.Toplevel) -> None:
         self.overlay_up = False
         self.current_overlay = None
+        # Also clean up any minimized-break state
+        for w in (getattr(self, "_mini_ind", None),
+                  getattr(self, "_mini_done_notif", None)):
+            if w:
+                try:
+                    w.destroy()
+                except tk.TclError:
+                    pass
+        self._mini_ind = None
+        self._mini_done_notif = None
+        self._mini_ov = None
         try:
             ov.destroy()
         except tk.TclError:
@@ -1972,6 +2123,7 @@ class ScreenBreakApp:
 
         # Countdown timer (5 minutes)
         self._micro_cd_var = tk.StringVar(value="5:00")
+        self._break_rem = 5 * 60  # Track remaining for minimize
         tk.Label(card, textvariable=self._micro_cd_var,
                  font=(MONO, 28, "bold"), fg=C_CD, bg=C_CARD).pack(pady=(0, 10))
 
@@ -2011,9 +2163,19 @@ class ScreenBreakApp:
                 self._desk_exercise.stop()
             self._snooze(ov)
 
+        def minimize_micro():
+            self._grab_note(note)
+            self._minimize_break(ov, self._break_rem, 5 * 60, restore_micro)
+
+        def restore_micro():
+            # Update the countdown display with current remaining
+            m, s = divmod(max(0, self._break_rem), 60)
+            self._micro_cd_var.set(f"{m}:{s:02d}")
+
         self._btn(bf, "  Back from break  ", C_BTN_PRI, back_from_break)
-        # In strict mode, only show snooze (no skip option via Escape)
         self._btn(bf, f"  {sm} more min  ", C_BTN_SEC, snooze_micro)
+        if not self.config.get("strict_mode", False):
+            self._btn(bf, "  Minimize  ", C_BTN_SEC, minimize_micro)
         self.current_overlay = ov
 
         # Start the 5-minute countdown
@@ -2031,6 +2193,7 @@ class ScreenBreakApp:
             return
         if rem < 0:
             rem = 0
+        self._break_rem = rem  # Track for minimize
         m, s = divmod(rem, 60)
         self._micro_cd_var.set(f"{m}:{s:02d}")
         if rem > 0:
@@ -2048,7 +2211,7 @@ class ScreenBreakApp:
 
         ov = tk.Toplevel(self.root)
         ov.overrideredirect(True);  ov.attributes("-topmost", True)
-        ov.configure(bg=C_BG);  self._centre(ov, 560, 460)
+        ov.configure(bg=C_BG);  self._centre(ov, 560, 520)
         ov.lift();  ov.focus_force()
 
         card = tk.Frame(ov, bg=C_CARD, padx=32, pady=20)
@@ -2076,7 +2239,15 @@ class ScreenBreakApp:
         note.pack(fill="x", pady=(0, 10))
 
         tk.Label(card, text=datetime.datetime.now().strftime("%I:%M %p").lstrip("0"),
-                 font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD).pack(pady=(0, 8))
+                 font=(FONT, 9), fg=C_TEXT_MUT, bg=C_CARD).pack(pady=(0, 4))
+
+        # Countdown timer
+        total_sec = max(1, duration) * 60
+        self._long_cd_var = tk.StringVar(value=self._fmt_mm_ss(total_sec))
+        self._break_rem = total_sec
+        tk.Label(card, textvariable=self._long_cd_var,
+                 font=(MONO, 28, "bold"), fg=C_CD, bg=C_CARD).pack(pady=(0, 10))
+
         bf = tk.Frame(card, bg=C_CARD);  bf.pack()
         sm = self.config.get("snooze_minutes", 5)
 
@@ -2100,9 +2271,21 @@ class ScreenBreakApp:
         def snz():
             self._grab_note(note);  self._snooze(ov)
 
+        def minimize_long():
+            self._grab_note(note)
+            self._minimize_break(ov, self._break_rem, total_sec, restore_long)
+
+        def restore_long():
+            self._long_cd_var.set(self._fmt_mm_ss(self._break_rem))
+
         self._btn(bf, "  Back from break  ", C_BTN_PRI, back_from_break, bold=True)
         self._btn(bf, f"  {sm} more min  ", C_BTN_SEC, snz)
+        if not self.config.get("strict_mode", False):
+            self._btn(bf, "  Minimize  ", C_BTN_SEC, minimize_long)
         self.current_overlay = ov
+
+        # Start countdown
+        self._long_countdown(ov, total_sec)
 
         # Escape = skip break (unless strict mode)
         if self.config.get("strict_mode", False):
@@ -2110,6 +2293,16 @@ class ScreenBreakApp:
         else:
             ov.bind("<Escape>", lambda e: skip_break())
         ov.focus_set()
+
+    def _long_countdown(self, ov, rem):
+        if self.current_overlay != ov:
+            return
+        if rem < 0:
+            rem = 0
+        self._break_rem = rem
+        self._long_cd_var.set(self._fmt_mm_ss(rem))
+        if rem > 0:
+            ov.after(1000, lambda: self._long_countdown(ov, rem - 1))
 
     # ━━━ Notes ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
