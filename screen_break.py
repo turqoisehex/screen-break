@@ -1391,12 +1391,23 @@ class ScreenBreakApp:
                 # Just became idle - record when
                 self.idle_since = datetime.datetime.now()
             elif not self.idle and was_idle and self.idle_since:
-                # Returned from idle - adjust timers (skip if paused; pause resume handles it)
+                # Returned from idle - reset or adjust timers
+                # (skip if paused; pause resume handles it)
                 if not self.paused:
-                    idle_duration = datetime.datetime.now() - self.idle_since
-                    self.last_eye_rest += idle_duration
-                    self.last_micro += idle_duration
-                    self.last_any_break += idle_duration
+                    now = datetime.datetime.now()
+                    idle_duration = now - self.idle_since
+                    total_idle_secs = threshold + idle_duration.total_seconds()
+
+                    # Idle >= threshold counts as eye rest - reset 20-min timer
+                    self.last_eye_rest = now
+
+                    # Idle >= 5 min counts as a full break - reset 45-min timer
+                    if total_idle_secs >= 300:
+                        self.last_micro = now
+                    else:
+                        self.last_micro += idle_duration
+
+                    self.last_any_break = now
                     self.last_mini_reminder += idle_duration
                     self.last_hydration_reminder += idle_duration
                 self.idle_since = None
