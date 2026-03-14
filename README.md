@@ -11,10 +11,16 @@ Download the latest release for your platform:
 | Platform | File |
 |----------|------|
 | Windows | `ScreenBreak-Windows.exe` |
-| macOS | `ScreenBreak-macOS` |
+| macOS | `ScreenBreak-macOS.dmg` |
 | Linux | `ScreenBreak-Linux` |
 
-Run the downloaded file — the app appears in your system tray. Right-click the tray icon for settings.
+**Windows / Linux:** Run the downloaded file — the app appears in your system tray.
+
+**macOS:**
+1. Open the `.dmg` and drag **Screen Break** to **Applications**
+2. Open it from Applications. On first launch, macOS will show a security warning because the app is not from the App Store
+3. Click **Open** when prompted (or go to **System Settings > Privacy & Security** and click **Open Anyway**)
+4. The app appears in your **menu bar** (top-right). Right-click the icon for settings
 
 > **From source:** Requires Python 3.10+. `pip install pystray Pillow screeninfo` then `python screen_break.py`.
 
@@ -132,7 +138,7 @@ pip install pyinstaller pystray Pillow screeninfo
 # Build
 pyinstaller screen_break.spec
 
-# Output: dist/ScreenBreak.exe (Windows) or dist/ScreenBreak (macOS/Linux)
+# Output: dist/ScreenBreak.exe (Windows), dist/ScreenBreak.app (macOS), or dist/ScreenBreak (Linux)
 ```
 
 ## Why Take Breaks?

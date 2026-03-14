@@ -168,11 +168,31 @@ def generate_icon():
         for w, h, data, is_png in entries:
             f.write(data)
 
+    # Generate .icns for macOS (requires iconutil, available on macOS)
+    if sys.platform == 'darwin':
+        import subprocess, shutil
+        iconset = 'icon.iconset'
+        os.makedirs(iconset, exist_ok=True)
+        for name, sz in [
+            ('icon_16x16.png', 16), ('icon_16x16@2x.png', 32),
+            ('icon_32x32.png', 32), ('icon_32x32@2x.png', 64),
+            ('icon_128x128.png', 128), ('icon_128x128@2x.png', 256),
+            ('icon_256x256.png', 256),
+        ]:
+            create_stopwatch_icon(sz).save(os.path.join(iconset, name), format='PNG')
+        subprocess.run(['iconutil', '-c', 'icns', iconset], check=True)
+        shutil.rmtree(iconset)
+
 # Always regenerate
 generate_icon()
 
 # Determine icon file based on platform
-icon_file = 'icon.ico' if sys.platform == 'win32' else 'icon.png'
+if sys.platform == 'win32':
+    icon_file = 'icon.ico'
+elif sys.platform == 'darwin':
+    icon_file = 'icon.icns'
+else:
+    icon_file = 'icon.png'
 
 hiddenimports = collect_submodules('pystray')
 
@@ -181,7 +201,8 @@ if sys.platform == 'win32':
     platform_imports = ['pystray._win32']
 elif sys.platform == 'darwin':
     platform_imports = ['pystray._darwin', 'objc', 'AppKit', 'Foundation',
-                        'Quartz', 'Quartz.CoreGraphics']
+                        'Quartz', 'Quartz.CoreGraphics',
+                        'PyObjCTools', 'PyObjCTools.MachSignals']
 else:  # Linux
     platform_imports = ['pystray._gtk', 'pystray._appindicator', 'pystray._xorg']
 
@@ -239,9 +260,10 @@ if sys.platform == 'darwin':
     app = BUNDLE(
         coll,
         name='ScreenBreak.app',
-        icon='icon.png',
+        icon=icon_file,
         bundle_identifier='com.turqoisehex.screenbreak',
         info_plist={
+            'CFBundleName': 'Screen Break',
             'CFBundleDisplayName': 'Screen Break',
             'CFBundleShortVersionString': '2.3',
             'NSHighResolutionCapable': True,
