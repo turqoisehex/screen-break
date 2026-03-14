@@ -16,7 +16,7 @@ jobs:
           - os: windows-latest
             artifact_name: ScreenBreak.exe
             asset_name: ScreenBreak-Windows.exe
-          - os: macos-13
+          - os: macos-latest
             asset_name: ScreenBreak-macOS
           - os: ubuntu-latest
             artifact_name: ScreenBreak
