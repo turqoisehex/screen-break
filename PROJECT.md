@@ -4,7 +4,7 @@ Complete technical documentation for the ScreenBreak application. Use this file 
 
 ## Architecture Overview
 
-**Single-file application:** `screen_break.py` (~3680 lines)
+**Single-file application:** `screen_break.py` (~4500 lines)
 - Pure Python + tkinter (no external GUI frameworks)
 - System tray integration via `pystray`
 - Cross-platform: Windows, macOS, Linux
@@ -83,7 +83,7 @@ Complete technical documentation for the ScreenBreak application. Use this file 
 - **Patterns:**
   - Box breathing (4-4-4-4)
   - Relaxing (4-7-8)
-  - Energizing (6-0-2-0)
+  - Energizing (4-0-4-0)
 - **Implementation:** `BreathingExercise` class with pulsing circle animation
 - **Phases:** Inhale (expand) → Hold → Exhale (contract) → Hold
 - **Config:** `breathing_exercises: true`
@@ -103,10 +103,39 @@ Complete technical documentation for the ScreenBreak application. Use this file 
 #### 10. Focus Session Timer (Pomodoro)
 - **Purpose:** Named work sessions with timer
 - **Flow:** Dialog → Enter task name → Start → Countdown → Completion
-- **Config:** `focus_session_enabled`, `focus_session_duration` (default 25 min)
+- **Config:** `focus_session_duration` (default 25 min)
 - **Stats:** Completed sessions tracked
 
-#### 11. Daily/Weekly Reports
+#### 11. Floating Countdown Widget
+- **Purpose:** Always-visible countdown to next break, shown as a small overlay
+- **Implementation:** `Toplevel` with `overrideredirect(True)`, click-through, draggable
+- **Config:** `show_floating_widget: true`, `widget_position: [x, y]`
+- **Access:** Toggle in Settings > Features
+
+#### 12. Taskbar Presence
+- **Purpose:** Show app in Windows taskbar so users can click to open settings
+- **Implementation:** Hidden root window trick with `overrideredirect` toggle
+- **Config:** `show_in_taskbar: true`
+- **Note:** Requires restart to apply changes
+
+#### 13. Settings Always on Top
+- **Purpose:** Keep settings window above other windows
+- **Config:** `status_always_on_top: false`
+
+#### 14. Breathing Circle Widget
+- **Purpose:** Always-on-top ambient breathing guide with configurable inhale/exhale timing
+- **Implementation:** Per-pixel alpha rendering via Windows GDI `UpdateLayeredWindow` (canvas fallback on other platforms). ~370 lines of code.
+- **Features:**
+  - Configurable inhale/hold/exhale/hold durations
+  - Three background modes: transparent, dark, teal
+  - Adjustable size (60-9999px) and opacity (1-100%)
+  - Click-through mode (Ctrl+drag to reposition)
+  - Position saved to config
+  - Right-click context menu (pause/resume/close)
+- **Config:** 10 keys prefixed `breathing_widget_*` (enabled, inhale, hold_in, exhale, hold_out, alpha, bg, size, click_through, position)
+- **Rendering:** 60fps animation loop. On Windows, uses DIB section + BLENDFUNCTION for true per-pixel alpha. Falls back to PIL ImageTk on other platforms.
+
+#### 15. Daily/Weekly Reports
 - **Purpose:** Visual history of break compliance
 - **Implementation:** Canvas-based stacked bar charts
 - **Data:** Last 7 days, breaks by type (eye/micro/scheduled)
@@ -123,7 +152,6 @@ Gentle mode (low energy)
 ─────────────
 Stats
 Notes
-Focus (start focus session)
 ─────────────
 Status & Settings
 Quit
@@ -199,15 +227,32 @@ DEFAULT_CONFIG = {
     "hydration_reminder_interval": 30,
 
     # Focus sessions
-    "focus_session_enabled": False,
     "focus_session_duration": 25,
 
     # Mini reminders
     "mini_reminders": False,
     "mini_reminder_interval": 10,
 
+    # Floating widget & window options
+    "show_floating_widget": True,
+    "widget_position": None,
+    "show_in_taskbar": True,
+    "status_always_on_top": False,
+
+    # Breathing circle widget
+    "breathing_widget_enabled": True,
+    "breathing_widget_inhale": 4.0,
+    "breathing_widget_hold_in": 0.0,
+    "breathing_widget_exhale": 8.0,
+    "breathing_widget_hold_out": 0.0,
+    "breathing_widget_alpha": 0.10,
+    "breathing_widget_bg": "transparent",
+    "breathing_widget_size": 1000,
+    "breathing_widget_click_through": True,
+    "breathing_widget_position": None,
+
     # Scheduled breaks
-    "scheduled_breaks": [
+    "breaks": [
         {"time": "09:45", "duration": 15, "title": "Stretch Break"},
         {"time": "11:30", "duration": 30, "title": "Movement & Mindfulness"},
         {"time": "13:30", "duration": 60, "title": "Lunch"},
@@ -295,7 +340,7 @@ git push origin v2.0.0
 
 ```
 ScreenBreak/
-├── screen_break.py          # Main application (single file, ~3680 lines)
+├── screen_break.py          # Main application (single file, ~4500 lines)
 ├── screen_break.spec         # PyInstaller build spec (generates icon on build)
 ├── generate_icon_win31.py    # Standalone Win 3.1 style icon generator
 ├── icon.ico                  # Windows icon (generated, multi-size)

@@ -64,7 +64,11 @@ HAS_TRAY = _ensure_deps()
 import threading, datetime, json, math, random, time
 from typing import Any, Callable, Optional
 
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageTk
+try:
+    from PIL import Image, ImageDraw, ImageFilter, ImageTk
+    HAS_PIL = True
+except ImportError:
+    HAS_PIL = False
 
 if HAS_TRAY:
     try:
@@ -77,6 +81,8 @@ IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
 FONT = "Helvetica Neue" if IS_MAC else "Segoe UI" if IS_WIN else "DejaVu Sans"
 MONO = "Menlo" if IS_MAC else "Consolas" if IS_WIN else "DejaVu Sans Mono"
+# macOS trackpads send Button-2 for right-click; bind both for context menus
+RIGHT_CLICK = ("<Button-2>", "<Button-3>") if IS_MAC else ("<Button-3>",)
 
 if IS_WIN:
     try:
@@ -129,16 +135,21 @@ def _init_idle_impl():
             from ctypes import Structure, c_uint, sizeof, byref, windll
             class LASTINPUTINFO(Structure):
                 _fields_ = [("cbSize", c_uint), ("dwTime", c_uint)]
+            _GetTickCount = getattr(windll.kernel32, 'GetTickCount64', windll.kernel32.GetTickCount)
             def _win_idle():
                 lii = LASTINPUTINFO()
                 lii.cbSize = sizeof(LASTINPUTINFO)
                 if windll.user32.GetLastInputInfo(byref(lii)):
-                    return (windll.kernel32.GetTickCount() - lii.dwTime) / 1000.0
+                    return (_GetTickCount() - lii.dwTime) / 1000.0
                 return 0.0
             _idle_impl = _win_idle
         elif IS_MAC:
             import ctypes, ctypes.util
-            cg = ctypes.cdll.LoadLibrary(ctypes.util.find_library("CoreGraphics"))
+            _cg_path = ctypes.util.find_library("CoreGraphics")
+            if not _cg_path:
+                # macOS 11+: find_library may fail; use absolute path
+                _cg_path = "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics"
+            cg = ctypes.cdll.LoadLibrary(_cg_path)
             fn = cg.CGEventSourceSecondsSinceLastEventType
             fn.restype = ctypes.c_double
             fn.argtypes = [ctypes.c_int32, ctypes.c_uint32]
@@ -151,7 +162,9 @@ def _init_idle_impl():
                     ["xprintidle"], capture_output=True, text=True, timeout=2)
                 return int(result.stdout.strip()) / 1000.0
             _idle_impl = _linux_idle
-    except Exception:
+    except Exception as _idle_err:
+        if IS_MAC:
+            print("  [!] Idle detection unavailable (grant Input Monitoring in System Settings > Privacy)")
         _idle_impl = lambda: 0.0
 
 def get_idle_seconds() -> float:
@@ -574,14 +587,14 @@ DEFAULT_CONFIG = {
     "show_in_taskbar": True,          # Show app in Windows taskbar (clickable)
     "status_always_on_top": False,    # Keep Settings window above other windows
     # Breathing circle widget (always-on-top ambient breathing guide)
-    "breathing_widget_enabled": False,
+    "breathing_widget_enabled": True,
     "breathing_widget_inhale": 4.0,   # Inhale duration in seconds (float)
     "breathing_widget_hold_in": 0.0,  # Hold at peak in seconds (float)
-    "breathing_widget_exhale": 4.0,   # Exhale duration in seconds (float)
+    "breathing_widget_exhale": 8.0,   # Exhale duration in seconds (float)
     "breathing_widget_hold_out": 0.0, # Hold at bottom in seconds (float)
-    "breathing_widget_alpha": 0.7,    # Window opacity 0.05-1.0
+    "breathing_widget_alpha": 0.10,   # Window opacity 0.01-1.0
     "breathing_widget_bg": "transparent",  # "transparent", "dark", "teal"
-    "breathing_widget_size": 120,     # Circle diameter in px (60+, no upper limit)
+    "breathing_widget_size": 1000,    # Circle diameter in px (60+, no upper limit)
     "breathing_widget_click_through": True,  # Click passes through widget (Ctrl+drag to move)
     "breathing_widget_position": None,  # Saved [x, y]
     "breaks": [
@@ -830,8 +843,41 @@ def apply_theme(theme_name: str) -> None:
     C_OK = theme["ok"];       C_ERR = theme["err"];         C_GENTLE = theme["gentle"]
 
 # ─── Fullscreen Detection ────────────────────────────────────
+def _is_fullscreen_mac() -> bool:
+    """Check if a fullscreen app is active on macOS via Quartz."""
+    try:
+        import Quartz
+        from AppKit import NSWorkspace
+        # Get frontmost app (frontmostApplication replaces deprecated activeApplication)
+        front_app = NSWorkspace.sharedWorkspace().frontmostApplication()
+        if not front_app:
+            return False
+        # Check all windows for the frontmost app
+        window_list = Quartz.CGWindowListCopyWindowInfo(
+            Quartz.kCGWindowListOptionOnScreenOnly | Quartz.kCGWindowListExcludeDesktopElements,
+            Quartz.kCGNullWindowID)
+        if not window_list:
+            return False
+        front_pid = front_app.processIdentifier()
+        main_display = Quartz.CGMainDisplayID()
+        screen_w = Quartz.CGDisplayPixelsWide(main_display)
+        screen_h = Quartz.CGDisplayPixelsHigh(main_display)
+        for win_info in window_list:
+            if win_info.get("kCGWindowOwnerPID") != front_pid:
+                continue
+            bounds = win_info.get("kCGWindowBounds", {})
+            w = bounds.get("Width", 0)
+            h = bounds.get("Height", 0)
+            if w >= screen_w - 10 and h >= screen_h - 10:
+                return True
+    except Exception:
+        pass
+    return False
+
 def is_fullscreen_app_active() -> bool:
-    """Check if a fullscreen application is active (Windows only)."""
+    """Check if a fullscreen application is active (Windows/macOS)."""
+    if IS_MAC:
+        return _is_fullscreen_mac()
     if not IS_WIN:
         return False
     try:
@@ -947,7 +993,7 @@ class ScreenBreakApp:
         self._warn_anim_id = None;  self._warn_rem = 0;  self._warn_total = 0
         self._status_win = None;  self._tip = None;  self._stats_win = None;  self._notes_win = None;  self._msg_editor_win = None
 
-        if HAS_TRAY:
+        if HAS_TRAY and not IS_MAC:
             threading.Thread(target=self._run_tray, daemon=True).start()
 
         # Floating widget state
@@ -998,13 +1044,21 @@ class ScreenBreakApp:
         self._show_startup()
         if self.config.get("show_floating_widget", True):
             self.root.after(500, self._create_floating_widget)
-        if self.config.get("breathing_widget_enabled", False):
+        if self.config.get("breathing_widget_enabled", True):
             self.root.after(600, self._create_breathing_widget)
         self._start_idle_monitor()
         self._start_mini_reminders()
         self._start_hydration_reminders()
         self._tick()
-        self.root.mainloop()
+
+        if IS_MAC and HAS_TRAY:
+            # macOS: pystray requires main thread for AppKit; start tkinter
+            # mainloop in a background thread, then run tray on main thread
+            self._tk_thread = threading.Thread(target=self.root.mainloop, daemon=True)
+            self._tk_thread.start()
+            self._run_tray()  # blocks main thread (required on macOS)
+        else:
+            self.root.mainloop()
 
     def _is_work_hours(self) -> bool:
         """Check if current time is within configured work hours."""
@@ -1028,7 +1082,7 @@ class ScreenBreakApp:
             if not self._is_work_hours():
                 self.root.after(60000, check_mini)
                 return
-            if self.config.get("focus_mode", False) and self.fullscreen_active:
+            if self.config.get("focus_mode", True) and self.fullscreen_active:
                 self.root.after(60000, check_mini)
                 return
 
@@ -1100,7 +1154,7 @@ class ScreenBreakApp:
                 self.root.after(60000, check_hydration)
                 return
             # Check if fullscreen mode should block
-            if self.config.get("focus_mode", False) and self.fullscreen_active:
+            if self.config.get("focus_mode", True) and self.fullscreen_active:
                 self.root.after(60000, check_hydration)
                 return
 
@@ -1360,7 +1414,8 @@ class ScreenBreakApp:
         # Escape to end session
         win.bind("<Escape>", lambda e: end_session(False))
         # Right-click to end session
-        win.bind("<Button-3>", lambda e: end_session(False))
+        for btn in RIGHT_CLICK:
+            win.bind(btn, lambda e: end_session(False))
 
         # Allow dragging (left-click on frame, not buttons)
         def start_drag(e):
@@ -1456,7 +1511,7 @@ class ScreenBreakApp:
     # ━━━ Scheduling ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     def _tick(self):
         # Check fullscreen state for focus mode
-        if self.config.get("focus_mode", False):
+        if self.config.get("focus_mode", True):
             self.fullscreen_active = is_fullscreen_app_active()
         else:
             self.fullscreen_active = False
@@ -1465,10 +1520,19 @@ class ScreenBreakApp:
         if self.warning_up and not self.warning_window:
             self.warning_up = False
             self.pending_break = None
+        # Safety valve: if overlay_up is stuck but window is gone, clear it
+        if self.overlay_up and self.current_overlay:
+            try:
+                if not self.current_overlay.winfo_exists():
+                    self.overlay_up = False
+                    self.current_overlay = None
+            except tk.TclError:
+                self.overlay_up = False
+                self.current_overlay = None
 
         # Skip break checking if paused, in break, idle, or in fullscreen focus mode
         if not self.paused and not self.overlay_up and not self.warning_up and not self.idle:
-            if not (self.config.get("focus_mode", False) and self.fullscreen_active):
+            if not (self.config.get("focus_mode", True) and self.fullscreen_active):
                 self._check()
         self.root.after(TICK * 1000, self._tick)
 
@@ -1530,6 +1594,8 @@ class ScreenBreakApp:
 
         # ── Priority 1: Scheduled breaks ──
         for brk in self.config.get("breaks", []):
+            if not isinstance(brk, dict) or "time" not in brk or "duration" not in brk or "title" not in brk:
+                continue
             key = brk["time"]
             if self.acked_today.get(key) == now.date():
                 continue
@@ -1625,8 +1691,21 @@ class ScreenBreakApp:
             # Stopwatch style: fill clockwise as time elapses (not counter-clockwise drain)
             elapsed = tot - rem
             ext = (elapsed / tot) * 360
-            c.create_arc(cx-r+8, cy-r+8, cx+r-8, cy+r-8,
-                         start=90, extent=-ext, fill=C_W_GL, outline="", stipple="gray50")
+            # stipple="gray50" is ignored on macOS Aqua; blend color manually
+            _arc_fill = C_W_GL
+            if IS_MAC:
+                # Approximate 50% stipple by blending fill with card bg
+                try:
+                    r1 = int(C_W_GL[1:3], 16); g1 = int(C_W_GL[3:5], 16); b1 = int(C_W_GL[5:7], 16)
+                    r2 = int(C_CARD[1:3], 16); g2 = int(C_CARD[3:5], 16); b2 = int(C_CARD[5:7], 16)
+                    _arc_fill = f"#{(r1+r2)//2:02x}{(g1+g2)//2:02x}{(b1+b2)//2:02x}"
+                except (ValueError, IndexError):
+                    pass
+                c.create_arc(cx-r+8, cy-r+8, cx+r-8, cy+r-8,
+                             start=90, extent=-ext, fill=_arc_fill, outline="")
+            else:
+                c.create_arc(cx-r+8, cy-r+8, cx+r-8, cy+r-8,
+                             start=90, extent=-ext, fill=_arc_fill, outline="", stipple="gray50")
         c.create_line(cx, cy, cx, cy-r+14, fill=C_TEXT, width=3)
         hx = cx + int((r-18)*math.sin(math.radians(60)))
         hy = cy - int((r-18)*math.cos(math.radians(60)))
@@ -2001,7 +2080,7 @@ class ScreenBreakApp:
                 return  # countdown still running, ignore
             self._close_eye_rest(ov, completed=True)
         ov.bind("<Escape>", on_escape)
-        ov.focus_set()
+        ov.focus_force()
 
     def _eye_countdown(self, ov, rem):
         if self.current_overlay != ov:
@@ -2197,7 +2276,7 @@ class ScreenBreakApp:
             ov.bind("<Escape>", lambda e: None)  # Disable escape in strict mode
         else:
             ov.bind("<Escape>", lambda e: skip_break())
-        ov.focus_set()
+        ov.focus_force()
 
     def _micro_countdown(self, ov, rem):
         if self.current_overlay != ov:
@@ -2303,7 +2382,7 @@ class ScreenBreakApp:
             ov.bind("<Escape>", lambda e: None)  # Disable escape in strict mode
         else:
             ov.bind("<Escape>", lambda e: skip_break())
-        ov.focus_set()
+        ov.focus_force()
 
     def _long_countdown(self, ov, rem):
         if self.current_overlay != ov:
@@ -2733,13 +2812,22 @@ class ScreenBreakApp:
         scroll_frame = tk.Frame(canvas, bg=C_BG)
         canvas_window = canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
 
-        # Mousewheel scrolling
+        # Mousewheel scrolling (scoped to this canvas)
+        self._scroll_bind_id = None
         def _on_mousewheel(event):
-            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            # macOS: delta is +-1..N (no /120 needed); Windows/Linux: delta is multiples of 120
+            if IS_MAC:
+                delta = -event.delta
+            else:
+                delta = int(-1 * (event.delta / 120))
+            if delta:
+                canvas.yview_scroll(delta, "units")
         def _on_enter(event):
-            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            self._scroll_bind_id = canvas.bind_all("<MouseWheel>", _on_mousewheel)
         def _on_leave(event):
-            canvas.unbind_all("<MouseWheel>")
+            if self._scroll_bind_id:
+                canvas.unbind_all("<MouseWheel>")
+                self._scroll_bind_id = None
         canvas.bind("<Enter>", _on_enter)
         canvas.bind("<Leave>", _on_leave)
 
@@ -2854,7 +2942,8 @@ class ScreenBreakApp:
         self._brk_container.pack(fill="x", **spad)
         self._brk_rows = []
         for brk in self.config.get("breaks", []):
-            self._add_brk_row(brk["time"], brk["duration"], brk["title"])
+            if isinstance(brk, dict) and "time" in brk and "duration" in brk and "title" in brk:
+                self._add_brk_row(brk["time"], brk["duration"], brk["title"])
 
         tk.Button(scroll_frame, text="+ Add break", font=(FONT, 9), bg=C_BTN_SEC, fg=C_TEXT_DIM,
                   relief="flat", padx=10, pady=2, cursor="hand2",
@@ -2953,7 +3042,8 @@ class ScreenBreakApp:
         # Taskbar presence
         tbf = tk.Frame(featf, bg=C_BG);  tbf.pack(fill="x", pady=2)
         self._taskbar_var = tk.BooleanVar(value=self.config.get("show_in_taskbar", True))
-        tk.Checkbutton(tbf, text="Show in taskbar (restart to apply)", font=(FONT, 10), fg=C_TEXT_DIM,
+        _taskbar_label = "Show in Dock (restart to apply)" if IS_MAC else "Show in taskbar (restart to apply)"
+        tk.Checkbutton(tbf, text=_taskbar_label, font=(FONT, 10), fg=C_TEXT_DIM,
                        bg=C_BG, variable=self._taskbar_var, selectcolor=C_CARD_IN,
                        activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
 
@@ -2970,7 +3060,7 @@ class ScreenBreakApp:
         bw_header.pack(fill="x", pady=(8, 2))
 
         bwf = tk.Frame(featf, bg=C_BG);  bwf.pack(fill="x", pady=2)
-        self._breath_enabled_var = tk.BooleanVar(value=self.config.get("breathing_widget_enabled", False))
+        self._breath_enabled_var = tk.BooleanVar(value=self.config.get("breathing_widget_enabled", True))
         tk.Checkbutton(bwf, text="Breathing circle widget (always visible)", font=(FONT, 10), fg=C_TEXT_DIM,
                        bg=C_BG, variable=self._breath_enabled_var, selectcolor=C_CARD_IN,
                        activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
@@ -2996,7 +3086,7 @@ class ScreenBreakApp:
             format="%.1f", font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
         self._breath_exhale_spin.pack(side="left");  self._breath_exhale_spin.delete(0, "end")
-        self._breath_exhale_spin.insert(0, str(float(self.config.get("breathing_widget_exhale", 4))))
+        self._breath_exhale_spin.insert(0, str(float(self.config.get("breathing_widget_exhale", 8))))
         tk.Label(bwrow1b, text="s Hold:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
         self._breath_hold_out_spin = tk.Spinbox(bwrow1b, from_=0, to=15, width=4, increment=0.5,
             format="%.1f", font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
@@ -3011,13 +3101,13 @@ class ScreenBreakApp:
             font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
         self._breath_size_spin.pack(side="left");  self._breath_size_spin.delete(0, "end")
-        self._breath_size_spin.insert(0, str(self.config.get("breathing_widget_size", 120)))
+        self._breath_size_spin.insert(0, str(self.config.get("breathing_widget_size", 1000)))
         tk.Label(bwrow2, text="px  Opacity:", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
-        self._breath_alpha_spin = tk.Spinbox(bwrow2, from_=5, to=100, width=3, increment=5,
+        self._breath_alpha_spin = tk.Spinbox(bwrow2, from_=1, to=100, width=3, increment=5,
             font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC,
             relief="flat", justify="center")
         self._breath_alpha_spin.pack(side="left");  self._breath_alpha_spin.delete(0, "end")
-        self._breath_alpha_spin.insert(0, str(int(self.config.get("breathing_widget_alpha", 0.7) * 100)))
+        self._breath_alpha_spin.insert(0, str(int(self.config.get("breathing_widget_alpha", 0.10) * 100)))
         tk.Label(bwrow2, text="%", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
 
         bwrow3 = tk.Frame(featf, bg=C_BG);  bwrow3.pack(fill="x", pady=1, padx=(20, 0))
@@ -3037,7 +3127,7 @@ class ScreenBreakApp:
         # Theme selection (applies instantly)
         themef = tk.Frame(featf, bg=C_BG);  themef.pack(fill="x", pady=2)
         tk.Label(themef, text="Theme:", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
-        self._theme_var = tk.StringVar(value=self.config.get("theme", "dark"))
+        self._theme_var = tk.StringVar(value=self.config.get("theme", "nord"))
 
         def apply_theme_now():
             theme = self._theme_var.get()
@@ -3326,7 +3416,7 @@ class ScreenBreakApp:
             except ValueError:
                 pass
             try:
-                self.config["breathing_widget_alpha"] = max(0.05, min(1.0, int(self._breath_alpha_spin.get()) / 100))
+                self.config["breathing_widget_alpha"] = max(0.01, min(1.0, int(self._breath_alpha_spin.get()) / 100))
             except ValueError:
                 pass
             self.config["breathing_widget_bg"] = self._breath_bg_var.get()
@@ -3393,6 +3483,8 @@ class ScreenBreakApp:
         self._breathing_var.set(dc["breathing_exercises"])
         self._desk_var.set(dc["desk_exercises"])
         self._aot_var.set(dc["status_always_on_top"])
+        self._widget_var.set(dc["show_floating_widget"])
+        self._taskbar_var.set(dc["show_in_taskbar"])
 
         # Reset breathing widget controls
         self._breath_enabled_var.set(dc["breathing_widget_enabled"])
@@ -3408,6 +3500,8 @@ class ScreenBreakApp:
         self._breath_bg_var.set(dc["breathing_widget_bg"])
         self._breath_ct_var.set(dc["breathing_widget_click_through"])
         self._destroy_breathing_widget()
+        if dc["breathing_widget_enabled"]:
+            self._create_breathing_widget()
 
         # Reset scheduled breaks
         for row in list(self._brk_rows):
@@ -3424,9 +3518,11 @@ class ScreenBreakApp:
         self._status_win.after(4000, _clear_fb)
 
     def _close_status(self) -> None:
-        # Clean up global mousewheel binding from settings scroll area
+        # Clean up mousewheel binding from settings scroll area
         try:
-            self.root.unbind_all("<MouseWheel>")
+            if self._scroll_bind_id:
+                self.root.unbind_all("<MouseWheel>")
+                self._scroll_bind_id = None
         except tk.TclError:
             pass
         if self._status_win:
@@ -3564,7 +3660,7 @@ class ScreenBreakApp:
         elif self.idle:
             tv.set("IDLE")
             dv.set("timers paused — awaiting activity")
-        elif self.config.get("focus_mode", False) and self.fullscreen_active:
+        elif self.config.get("focus_mode", True) and self.fullscreen_active:
             tv.set("PRESENTING")
             dv.set("auto-paused — fullscreen detected")
         elif self.paused:
@@ -3585,7 +3681,7 @@ class ScreenBreakApp:
         elif self.idle:
             tv.set("IDLE")
             dv.set("timers paused — awaiting activity")
-        elif self.config.get("focus_mode", False) and self.fullscreen_active:
+        elif self.config.get("focus_mode", True) and self.fullscreen_active:
             tv.set("PRESENTING")
             dv.set("auto-paused — fullscreen detected")
         elif self.paused:
@@ -3763,7 +3859,8 @@ class ScreenBreakApp:
             widget.bind("<Button-1>", self._widget_press)
             widget.bind("<B1-Motion>", self._widget_drag)
             widget.bind("<ButtonRelease-1>", self._widget_release)
-            widget.bind("<Button-3>", self._widget_menu)
+            for btn in RIGHT_CLICK:
+                widget.bind(btn, self._widget_menu)
 
         self._update_floating_widget()
 
@@ -3841,7 +3938,7 @@ class ScreenBreakApp:
             text = "Off hours"
         elif self.idle:
             text = "IDLE"
-        elif self.config.get("focus_mode", False) and self.fullscreen_active:
+        elif self.config.get("focus_mode", True) and self.fullscreen_active:
             text = "Presenting"
         elif self.paused:
             text = "PAUSED"
@@ -3915,12 +4012,12 @@ class ScreenBreakApp:
 
     def _create_breathing_widget(self) -> None:
         """Create an always-on-top breathing circle widget."""
-        if self._breath_win:
+        if self._breath_win or not HAS_PIL:
             return
 
-        size = self.config.get("breathing_widget_size", 120)
+        size = self.config.get("breathing_widget_size", 1000)
         bg_mode = self.config.get("breathing_widget_bg", "transparent")
-        alpha = self.config.get("breathing_widget_alpha", 0.7)
+        alpha = self.config.get("breathing_widget_alpha", 0.10)
         win_w = size + 20
         win_h = size + 20
 
@@ -3936,28 +4033,38 @@ class ScreenBreakApp:
             self._breath_use_layered = True
             self._breath_bg_rgb = (0, 0, 0)  # unused for layered rendering
         elif bg_mode == "transparent":
-            # Non-Windows fallback: chroma key (has aliased edges)
-            chroma_hex = "#%02x%02x%02x" % self._BREATH_CHROMA
-            win.configure(bg=chroma_hex)
-            try:
-                win.attributes("-transparentcolor", chroma_hex)
-                win.attributes("-alpha", max(0.05, min(1.0, alpha)))
-            except tk.TclError:
+            if IS_MAC:
+                # macOS Aqua: -transparentcolor unsupported; use dark bg with alpha
                 win.configure(bg="#111827")
+                self._breath_bg_rgb = (17, 24, 39)
+                try:
+                    win.attributes("-alpha", max(0.01, min(1.0, alpha)))
+                except tk.TclError:
+                    pass
                 bg_mode = "dark"
-            self._breath_bg_rgb = self._BREATH_CHROMA
+            else:
+                # Non-Windows fallback: chroma key (has aliased edges)
+                chroma_hex = "#%02x%02x%02x" % self._BREATH_CHROMA
+                win.configure(bg=chroma_hex)
+                try:
+                    win.attributes("-transparentcolor", chroma_hex)
+                    win.attributes("-alpha", max(0.01, min(1.0, alpha)))
+                except tk.TclError:
+                    win.configure(bg="#111827")
+                    bg_mode = "dark"
+                self._breath_bg_rgb = self._BREATH_CHROMA
         if bg_mode == "teal":
             win.configure(bg="#0d3d3d")
             self._breath_bg_rgb = (13, 61, 61)
             try:
-                win.attributes("-alpha", max(0.05, min(1.0, alpha)))
+                win.attributes("-alpha", max(0.01, min(1.0, alpha)))
             except tk.TclError:
                 pass
         elif bg_mode == "dark":
             win.configure(bg="#111827")
             self._breath_bg_rgb = (17, 24, 39)
             try:
-                win.attributes("-alpha", max(0.05, min(1.0, alpha)))
+                win.attributes("-alpha", max(0.01, min(1.0, alpha)))
             except tk.TclError:
                 pass
 
@@ -3970,7 +4077,7 @@ class ScreenBreakApp:
             x = max(0, min(x, sw - win_w))
             y = max(0, min(y, sh - win_h))
         else:
-            x, y = sw - win_w - 20, sh - win_h - 100
+            x, y = max(0, sw - win_w - 20), max(0, sh - win_h - 100)
         win.geometry(f"{win_w}x{win_h}+{x}+{y}")
 
         # Canvas (used for rendering in non-layered mode, events in all modes)
@@ -3990,7 +4097,8 @@ class ScreenBreakApp:
             widget.bind("<Button-1>", self._breath_press)
             widget.bind("<B1-Motion>", self._breath_drag)
             widget.bind("<ButtonRelease-1>", self._breath_release)
-            widget.bind("<Button-3>", self._breath_menu)
+            for btn in RIGHT_CLICK:
+                widget.bind(btn, self._breath_menu)
 
         # HWND setup (Windows)
         self._breath_hwnd = None
@@ -4015,17 +4123,18 @@ class ScreenBreakApp:
             except Exception:
                 self._breath_use_layered = False
 
-        # Click-through
-        if self._breath_hwnd and self.config.get("breathing_widget_click_through", True):
+        # Click-through (Windows only — no macOS/Linux equivalent)
+        if IS_WIN and self._breath_hwnd and self.config.get("breathing_widget_click_through", True):
             self._breath_set_click_through(True)
 
         self._breath_running = True
         self._animate_breathing_widget()
-        self._breath_poll_ctrl()
+        if IS_WIN:
+            self._breath_poll_ctrl()
 
     def _breath_set_click_through(self, enable: bool) -> None:
-        """Toggle WS_EX_TRANSPARENT on the breathing widget (Windows)."""
-        if not self._breath_hwnd:
+        """Toggle WS_EX_TRANSPARENT on the breathing widget (Windows only)."""
+        if not IS_WIN or not self._breath_hwnd:
             return
         try:
             GWL_EXSTYLE = -20
@@ -4042,8 +4151,8 @@ class ScreenBreakApp:
             pass
 
     def _breath_poll_ctrl(self) -> None:
-        """Poll Ctrl key independently of animation (runs even when paused)."""
-        if not self._breath_win or not self._breath_hwnd:
+        """Poll Ctrl key independently of animation (Windows only)."""
+        if not IS_WIN or not self._breath_win or not self._breath_hwnd:
             return
         try:
             if not self._breath_win.winfo_exists():
@@ -4148,7 +4257,7 @@ class ScreenBreakApp:
             ctypes.memmove(self._breath_ppv, bgra_bytes, len(bgra_bytes))
 
             alpha_byte = max(1, min(255, int(
-                self.config.get("breathing_widget_alpha", 0.7) * 255)))
+                self.config.get("breathing_widget_alpha", 0.10) * 255)))
             blend = (ctypes.c_ubyte * 4)(0, 0, alpha_byte, 1)
             sz = (ctypes.c_long * 2)(w, h)
             pt_src = (ctypes.c_long * 2)(0, 0)
@@ -4174,7 +4283,7 @@ class ScreenBreakApp:
         # --- Compute breath factor (0=contracted, 1=expanded) ---
         inhale_t = max(1.0, float(self.config.get("breathing_widget_inhale", 4)))
         hold_in_t = max(0.0, float(self.config.get("breathing_widget_hold_in", 0)))
-        exhale_t = max(1.0, float(self.config.get("breathing_widget_exhale", 4)))
+        exhale_t = max(1.0, float(self.config.get("breathing_widget_exhale", 8)))
         hold_out_t = max(0.0, float(self.config.get("breathing_widget_hold_out", 0)))
         total_cycle = inhale_t + hold_in_t + exhale_t + hold_out_t
 
@@ -4235,9 +4344,12 @@ class ScreenBreakApp:
             except tk.TclError:
                 return
 
-        # Schedule next frame (~60fps)
+        # Schedule next frame (~60fps on Windows, ~30fps on macOS for large sizes)
+        _frame_ms = 16
+        if IS_MAC and max(win_w, win_h) > 500:
+            _frame_ms = 33  # ~30fps to reduce CPU on non-layered rendering path
         try:
-            self._breath_win.after(16, self._animate_breathing_widget)
+            self._breath_win.after(_frame_ms, self._animate_breathing_widget)
         except tk.TclError:
             self._breath_running = False
 
@@ -4262,8 +4374,8 @@ class ScreenBreakApp:
             self.config["breathing_widget_position"] = [x, y]
             save_config(self.config)
             self._breath_dragged = False
-            # Re-enable click-through after drag completes
-            if self._breath_hwnd and self.config.get("breathing_widget_click_through", True):
+            # Re-enable click-through after drag completes (Windows only)
+            if IS_WIN and self._breath_hwnd and self.config.get("breathing_widget_click_through", True):
                 self._breath_set_click_through(True)
 
     def _breath_menu(self, event) -> None:
@@ -4425,7 +4537,8 @@ class ScreenBreakApp:
             pystray.MenuItem("📝  Notes",
                 lambda icon, item: self.root.after(0, self._show_notes_win)),
             pystray.Menu.SEPARATOR,
-            pystray.MenuItem("Quit", self._quit),
+            pystray.MenuItem("Quit",
+                lambda icon, item: self.root.after(0, self._quit)),
         )
         self.tray = pystray.Icon("screen_break", img, "Screen Break", menu)
         self.tray.run()
@@ -4456,6 +4569,7 @@ class ScreenBreakApp:
 
     def _quit(self, icon: Optional[Any] = None, item: Optional[Any] = None) -> None:
         save_stats(self.stats)
+        self._destroy_breathing_widget()
         if HAS_TRAY and hasattr(self, "tray"):
             self.tray.stop()
         self.root.after(0, self.root.quit)
