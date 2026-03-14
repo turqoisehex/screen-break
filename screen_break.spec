@@ -176,11 +176,12 @@ icon_file = 'icon.ico' if sys.platform == 'win32' else 'icon.png'
 
 hiddenimports = collect_submodules('pystray')
 
-# Platform-specific pystray backends
+# Platform-specific pystray backends and dependencies
 if sys.platform == 'win32':
     platform_imports = ['pystray._win32']
 elif sys.platform == 'darwin':
-    platform_imports = ['pystray._darwin']
+    platform_imports = ['pystray._darwin', 'objc', 'AppKit', 'Foundation',
+                        'Quartz', 'Quartz.CoreGraphics']
 else:  # Linux
     platform_imports = ['pystray._gtk', 'pystray._appindicator', 'pystray._xorg']
 
@@ -206,24 +207,66 @@ a = Analysis(
 
 pyz = PYZ(a.pure, optimize=1)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
-    name='ScreenBreak',
-    debug=False,
-    bootloader_ignore_signals=False,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    runtime_tmpdir=None,
-    console=False,
-    disable_windowed_traceback=False,
-    argv_emulation=False,
-    target_arch=None,
-    codesign_identity=None,
-    entitlements_file=None,
-    icon=icon_file,
-)
+if sys.platform == 'darwin':
+    # macOS: one-folder mode + .app bundle for proper Dock/Finder integration
+    exe = EXE(
+        pyz,
+        a.scripts,
+        [],
+        exclude_binaries=True,
+        name='ScreenBreak',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=icon_file,
+    )
+    coll = COLLECT(
+        exe,
+        a.binaries,
+        a.datas,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        name='ScreenBreak',
+    )
+    app = BUNDLE(
+        coll,
+        name='ScreenBreak.app',
+        icon='icon.png',
+        bundle_identifier='com.turqoisehex.screenbreak',
+        info_plist={
+            'CFBundleDisplayName': 'Screen Break',
+            'CFBundleShortVersionString': '2.3',
+            'NSHighResolutionCapable': True,
+        },
+    )
+else:
+    # Windows/Linux: single-file executable
+    exe = EXE(
+        pyz,
+        a.scripts,
+        a.binaries,
+        a.datas,
+        [],
+        name='ScreenBreak',
+        debug=False,
+        bootloader_ignore_signals=False,
+        strip=False,
+        upx=True,
+        upx_exclude=[],
+        runtime_tmpdir=None,
+        console=False,
+        disable_windowed_traceback=False,
+        argv_emulation=False,
+        target_arch=None,
+        codesign_identity=None,
+        entitlements_file=None,
+        icon=icon_file,
+    )

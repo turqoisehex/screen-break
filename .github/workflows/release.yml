@@ -17,7 +17,6 @@ jobs:
             artifact_name: ScreenBreak.exe
             asset_name: ScreenBreak-Windows.exe
           - os: macos-latest
-            artifact_name: ScreenBreak
             asset_name: ScreenBreak-macOS
           - os: ubuntu-latest
             artifact_name: ScreenBreak
@@ -45,10 +44,28 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pystray Pillow screeninfo
 
+      - name: Install macOS Python dependencies
+        if: runner.os == 'macOS'
+        run: pip install pyobjc-framework-Quartz pyobjc-framework-Cocoa
+
       - name: Build with PyInstaller
         run: pyinstaller screen_break.spec
 
+      - name: Sign and package macOS app
+        if: runner.os == 'macOS'
+        run: |
+          codesign --force --deep --sign - dist/ScreenBreak.app
+          cd dist && zip -r -y ScreenBreak-macOS.zip ScreenBreak.app
+
+      - name: Upload macOS artifact
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ScreenBreak-macOS
+          path: dist/ScreenBreak-macOS.zip
+
       - name: Upload artifact
+        if: runner.os != 'macOS'
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset_name }}
@@ -68,7 +85,7 @@ jobs:
         run: |
           mkdir -p release
           cp artifacts/ScreenBreak-Windows.exe/ScreenBreak.exe release/ScreenBreak-Windows.exe
-          cp artifacts/ScreenBreak-macOS/ScreenBreak release/ScreenBreak-macOS
+          cp artifacts/ScreenBreak-macOS/ScreenBreak-macOS.zip release/ScreenBreak-macOS.zip
           cp artifacts/ScreenBreak-Linux/ScreenBreak release/ScreenBreak-Linux
           ls -la release/
 
@@ -77,7 +94,7 @@ jobs:
         with:
           files: |
             release/ScreenBreak-Windows.exe
-            release/ScreenBreak-macOS
+            release/ScreenBreak-macOS.zip
             release/ScreenBreak-Linux
           generate_release_notes: true
         env:
