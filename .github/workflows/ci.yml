@@ -30,10 +30,10 @@ jobs:
           pip install pystray Pillow screeninfo
 
       - name: Install Linux dependencies
-        run: sudo apt-get update && sudo apt-get install -y python3-tk
+        run: sudo apt-get update && sudo apt-get install -y python3-tk xvfb
 
       - name: Lint with ruff
         run: ruff check screen_break.py
 
       - name: Verify import
-        run: python -c "import screen_break; print('Import OK')"
+        run: xvfb-run python -c "import screen_break; print('Import OK')"
