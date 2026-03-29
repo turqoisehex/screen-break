@@ -1,0 +1,72 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "screen-break"
+version = "2.3.7"
+description = "Healthy break reminder app with 20-20-20 eye rest, micro-pauses, guided exercises, themes, and multi-monitor support"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+authors = [{name = "turqoisehex"}]
+keywords = [
+    "break-reminder",
+    "eye-strain",
+    "eye-care",
+    "20-20-20",
+    "health",
+    "ergonomics",
+    "rsi-prevention",
+    "pomodoro",
+    "productivity",
+    "system-tray",
+    "tkinter",
+    "desktop-app",
+    "break-timer",
+    "screen-time",
+    "wellness",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: X11 Applications",
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: MacOS X",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Desktop Environment",
+    "Topic :: Utilities",
+]
+dependencies = [
+    "pystray>=0.19",
+    "Pillow>=9.0",
+    "screeninfo>=0.8",
+]
+
+[project.urls]
+Homepage = "https://github.com/turqoisehex/screen-break"
+Repository = "https://github.com/turqoisehex/screen-break"
+Issues = "https://github.com/turqoisehex/screen-break/issues"
+Changelog = "https://github.com/turqoisehex/screen-break/blob/master/CHANGELOG.md"
+
+[project.scripts]
+screen-break = "screen_break:main"
+
+[project.gui-scripts]
+screen-break-gui = "screen_break:main"
+
+[tool.setuptools]
+py-modules = ["screen_break"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+ignore = ["E501", "E741", "W291", "W293", "W391", "E402", "F841"]

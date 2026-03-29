@@ -1,6 +1,8 @@
 # Screen Break
 
+[![CI](https://github.com/turqoisehex/screen-break/actions/workflows/ci.yml/badge.svg)](https://github.com/turqoisehex/screen-break/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/turqoisehex/screen-break)](https://github.com/turqoisehex/screen-break/releases/latest)
+[![PyPI](https://img.shields.io/pypi/v/screen-break)](https://pypi.org/project/screen-break/)
 [![License](https://img.shields.io/github/license/turqoisehex/screen-break)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/turqoisehex/screen-break?style=social)](https://github.com/turqoisehex/screen-break)
 
@@ -26,7 +28,9 @@ Download the latest release for your platform:
 3. Click **Open** when prompted (or go to **System Settings > Privacy & Security** and click **Open Anyway**)
 4. The app appears in your **menu bar** (top-right). Right-click the icon for settings
 
-> **From source:** Requires Python 3.10+. `pip install pystray Pillow screeninfo` then `python screen_break.py`.
+> **From pip:** `pip install screen-break` then run `screen-break` from the command line.
+>
+> **From source:** `git clone https://github.com/turqoisehex/screen-break.git && cd screen-break && pip install -e .` then `python screen_break.py`.
 
 ## Features
 
@@ -161,6 +165,10 @@ The 20-20-20 rule (every 20 minutes, look at something 20 feet away for 20 secon
 Contributions are welcome! This is a side project maintained in spare time, so please be patient with response times.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines. Check out issues labeled [`good first issue`](https://github.com/turqoisehex/screen-break/labels/good%20first%20issue) for beginner-friendly tasks.
+
+## Keywords
+
+break reminder, eye strain, 20-20-20 rule, screen break, eye care, RSI prevention, repetitive strain injury, pomodoro timer, pomodoro technique, micro pause, stretch reminder, desk exercises, breathing exercises, eye exercises, ergonomics, digital eye strain, computer vision syndrome, health app, productivity, work break, system tray app, break timer, screen time, wellness, hydration reminder, posture reminder, focus timer, tkinter, python desktop app, cross-platform, windows break reminder, macos break reminder, linux break reminder
 
 ## License
 

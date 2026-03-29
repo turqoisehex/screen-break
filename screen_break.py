@@ -547,7 +547,9 @@ class DeskExerciseAnimation:
 
 DEFAULT_CONFIG = {
     "eye_rest_interval": 20,
+    "eye_rest_enabled": True,
     "micro_pause_interval": 45,
+    "micro_pause_enabled": True,
     "minimum_break_gap": 20,
     "warning_seconds": 60,
     "snooze_minutes": 5,
@@ -1617,14 +1619,14 @@ class ScreenBreakApp:
         # ── Priority 2: Micro-pause (skip if scheduled break within coast margin) ──
         coast_margin = self.config.get("coast_margin_minutes", DEFAULT_COAST_MARGIN)
         el_mp = (now - self.last_micro).total_seconds() / 60
-        if el_mp >= self.micro_iv:
+        if el_mp >= self.micro_iv and self.config.get("micro_pause_enabled", True):
             if not sched_within(coast_margin):
                 self._begin_warning(self._show_micro, (), min(30, warn_s))
                 return
 
         # ── Priority 3: Eye rest (skip if scheduled break within coast margin) ──
         el_er = (now - self.last_eye_rest).total_seconds() / 60
-        if el_er >= self.eye_iv:
+        if el_er >= self.eye_iv and self.config.get("eye_rest_enabled", True):
             # Also skip if micro-pause is due very soon (but only if coast_margin < micro_iv)
             micro_soon_threshold = max(0, self.micro_iv - coast_margin)
             if not sched_within(coast_margin) and (micro_soon_threshold == 0 or el_mp < micro_soon_threshold):
@@ -2855,6 +2857,10 @@ class ScreenBreakApp:
         self._eye_spin.pack(side="left");  self._eye_spin.delete(0, "end")
         self._eye_spin.insert(0, str(self.config.get("eye_rest_interval", 20)))
         tk.Label(ef, text=" min", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+        self._eye_rest_var = tk.BooleanVar(value=self.config.get("eye_rest_enabled", True))
+        tk.Checkbutton(ef, variable=self._eye_rest_var, bg=C_BG, fg=C_TEXT_DIM,
+                       selectcolor=C_CARD_IN, activebackground=C_BG,
+                       activeforeground=C_TEXT_DIM).pack(side="left", padx=(6, 0))
 
         mf = tk.Frame(ivf, bg=C_BG);  mf.pack(fill="x", pady=2)
         tk.Label(mf, text="Micro-pause every", font=(FONT, 10), fg=C_TEXT_DIM,
@@ -2865,6 +2871,10 @@ class ScreenBreakApp:
         self._micro_spin.pack(side="left");  self._micro_spin.delete(0, "end")
         self._micro_spin.insert(0, str(self.config.get("micro_pause_interval", 45)))
         tk.Label(mf, text=" min", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+        self._micro_pause_var = tk.BooleanVar(value=self.config.get("micro_pause_enabled", True))
+        tk.Checkbutton(mf, variable=self._micro_pause_var, bg=C_BG, fg=C_TEXT_DIM,
+                       selectcolor=C_CARD_IN, activebackground=C_BG,
+                       activeforeground=C_TEXT_DIM).pack(side="left", padx=(6, 0))
 
         gf = tk.Frame(ivf, bg=C_BG);  gf.pack(fill="x", pady=2)
         tk.Label(gf, text="Min gap between breaks", font=(FONT, 10), fg=C_TEXT_DIM,
@@ -3338,7 +3348,9 @@ class ScreenBreakApp:
             breaks.sort(key=lambda b: b["time"])
 
             self.config["eye_rest_interval"] = eye
+            self.config["eye_rest_enabled"] = self._eye_rest_var.get()
             self.config["micro_pause_interval"] = micro
+            self.config["micro_pause_enabled"] = self._micro_pause_var.get()
             self.config["minimum_break_gap"] = gap
             self.config["eye_rest_duration"] = eye_dur
             self.config["snooze_minutes"] = snooze
@@ -3451,7 +3463,9 @@ class ScreenBreakApp:
 
         # Refresh interval widgets
         self._eye_spin.delete(0, "end");  self._eye_spin.insert(0, str(dc["eye_rest_interval"]))
+        self._eye_rest_var.set(dc.get("eye_rest_enabled", True))
         self._micro_spin.delete(0, "end");  self._micro_spin.insert(0, str(dc["micro_pause_interval"]))
+        self._micro_pause_var.set(dc.get("micro_pause_enabled", True))
         self._gap_spin.delete(0, "end");  self._gap_spin.insert(0, str(dc["minimum_break_gap"]))
         self._eye_dur_spin.delete(0, "end");  self._eye_dur_spin.insert(0, str(dc["eye_rest_duration"]))
         self._snooze_spin.delete(0, "end");  self._snooze_spin.insert(0, str(dc["snooze_minutes"]))
@@ -3654,7 +3668,10 @@ class ScreenBreakApp:
 
         # ── Eye rest ──
         tv, dv = self._st_rows["eye"]
-        if outside_hours:
+        if not self.config.get("eye_rest_enabled", True):
+            tv.set("OFF")
+            dv.set("disabled")
+        elif outside_hours:
             tv.set("—")
             dv.set("outside work hours")
         elif self.idle:
@@ -3675,7 +3692,10 @@ class ScreenBreakApp:
 
         # ── Micro-pause ──
         tv, dv = self._st_rows["micro"]
-        if outside_hours:
+        if not self.config.get("micro_pause_enabled", True):
+            tv.set("OFF")
+            dv.set("disabled")
+        elif outside_hours:
             tv.set("—")
             dv.set("outside work hours")
         elif self.idle:
@@ -4576,5 +4596,9 @@ class ScreenBreakApp:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-if __name__ == "__main__":
+def main():
     ScreenBreakApp()
+
+
+if __name__ == "__main__":
+    main()
