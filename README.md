@@ -1,5 +1,9 @@
 # Screen Break
 
+[![Release](https://img.shields.io/github/v/release/turqoisehex/screen-break)](https://github.com/turqoisehex/screen-break/releases/latest)
+[![License](https://img.shields.io/github/license/turqoisehex/screen-break)](LICENSE)
+[![Stars](https://img.shields.io/github/stars/turqoisehex/screen-break?style=social)](https://github.com/turqoisehex/screen-break)
+
 A healthy break reminder app that runs in your system tray. Reminds you to rest your eyes, stretch, and take regular breaks throughout your workday.
 
 ## Install
@@ -152,10 +156,12 @@ Research shows that regular breaks:
 
 The 20-20-20 rule (every 20 minutes, look at something 20 feet away for 20 seconds) is recommended by eye care professionals to reduce digital eye strain.
 
-## License
-
-MIT License — feel free to use, modify, and share.
-
 ## Contributing
 
-Issues and pull requests welcome!
+Contributions are welcome! This is a side project maintained in spare time, so please be patient with response times.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup and guidelines. Check out issues labeled [`good first issue`](https://github.com/turqoisehex/screen-break/labels/good%20first%20issue) for beginner-friendly tasks.
+
+## License
+
+[MIT](LICENSE)

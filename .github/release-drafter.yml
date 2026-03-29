@@ -1,0 +1,46 @@
+name-template: 'v$RESOLVED_VERSION'
+tag-template: 'v$RESOLVED_VERSION'
+template: |
+  ## What's Changed
+
+  $CHANGES
+
+  ## Contributors
+
+  $CONTRIBUTORS
+categories:
+  - title: New Features
+    labels:
+      - enhancement
+      - feature
+  - title: Bug Fixes
+    labels:
+      - bug
+      - fix
+  - title: Documentation
+    labels:
+      - documentation
+  - title: Maintenance
+    labels:
+      - chore
+      - ci
+      - dependencies
+      - refactor
+version-resolver:
+  major:
+    labels:
+      - breaking
+  minor:
+    labels:
+      - enhancement
+      - feature
+  patch:
+    labels:
+      - bug
+      - fix
+      - documentation
+      - chore
+      - ci
+      - dependencies
+      - refactor
+  default: patch

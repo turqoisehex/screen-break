@@ -21,3 +21,10 @@ __pycache__/
 # OS
 .DS_Store
 Thumbs.db
+
+# Project
+.cc-audit.md
+.env
+*.log
+.venv/
+venv/

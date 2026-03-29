@@ -1,0 +1,26 @@
+name: Welcome
+
+on:
+  issues:
+    types: [opened]
+  pull_request_target:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  welcome:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/first-interaction@v1.3.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+          issue-message: >
+            Thanks for opening your first issue! We'll take a look as soon as we can.
+            This is a side project maintained in spare time, so please be patient with response times.
+          pr-message: >
+            Thanks for your first pull request! We appreciate the contribution.
+            This is a side project maintained in spare time, so please be patient with review times.
+            Make sure you've read [CONTRIBUTING.md](https://github.com/turqoisehex/screen-break/blob/master/CONTRIBUTING.md).
