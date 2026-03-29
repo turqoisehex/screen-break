@@ -2,7 +2,6 @@
 
 [![CI](https://github.com/turqoisehex/screen-break/actions/workflows/ci.yml/badge.svg)](https://github.com/turqoisehex/screen-break/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/turqoisehex/screen-break)](https://github.com/turqoisehex/screen-break/releases/latest)
-[![PyPI](https://img.shields.io/pypi/v/screen-break)](https://pypi.org/project/screen-break/)
 [![License](https://img.shields.io/github/license/turqoisehex/screen-break)](LICENSE)
 [![Stars](https://img.shields.io/github/stars/turqoisehex/screen-break?style=social)](https://github.com/turqoisehex/screen-break)
 
@@ -28,8 +27,6 @@ Download the latest release for your platform:
 3. Click **Open** when prompted (or go to **System Settings > Privacy & Security** and click **Open Anyway**)
 4. The app appears in your **menu bar** (top-right). Right-click the icon for settings
 
-> **From pip:** `pip install screen-break` then run `screen-break` from the command line.
->
 > **From source:** `git clone https://github.com/turqoisehex/screen-break.git && cd screen-break && pip install -e .` then `python screen_break.py`.
 
 ## Features

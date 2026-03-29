@@ -54,12 +54,6 @@ Repository = "https://github.com/turqoisehex/screen-break"
 Issues = "https://github.com/turqoisehex/screen-break/issues"
 Changelog = "https://github.com/turqoisehex/screen-break/blob/master/CHANGELOG.md"
 
-[project.scripts]
-screen-break = "screen_break:main"
-
-[project.gui-scripts]
-screen-break-gui = "screen_break:main"
-
 [tool.setuptools]
 py-modules = ["screen_break"]
 
