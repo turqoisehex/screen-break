@@ -45,7 +45,7 @@ classifiers = [
 dependencies = [
     "pystray>=0.19",
     "Pillow>=9.0",
-    "screeninfo>=0.8",
+    "screeninfo>=0.8.1",
 ]
 
 [project.urls]
