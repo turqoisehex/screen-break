@@ -1177,17 +1177,21 @@ class ScreenBreakApp:
         self._deo_keyboard_hook = None
         self._deo_hook_proc = None  # must stay referenced or ctypes GCs the callback -> crash
         self._deo_task_mgr_disabled = False
+        self._deo_task_mgr_hklm_active = False  # whether HKLM was included when we disabled it
         self._deo_unlock_buffer = []  # recent keydowns, for hidden-gesture matching
         self._deo_pin_prompt_active = False  # while True, the hook stops swallowing input
         self._deo_pin_win = None
         # Settings-edit / disarm authorization: requires the same hidden
         # gesture as lockout-unlock, fed via a normal Tk binding since the
-        # OS-level hook only runs during an active lockout.
+        # OS-level hook only runs during an active lockout. The binding itself
+        # is only live while the settings window is open (see
+        # _show_status_window / _close_status) — not for the app's whole
+        # lifetime — so the gesture can't pre-authorize a disarm/edit attempt
+        # that hasn't actually started yet, and unrelated (non-Deo) users of
+        # this app never get background key-tracking they didn't ask for.
         self._deo_settings_authenticated = False
         self._deo_settings_gesture_buffer = []
         self._deo_settings_widgets = []
-        self.root.bind_all("<KeyPress-Scroll_Lock>", self._deo_settings_gesture_feed)
-        self.root.bind_all("<KeyPress-Pause>", self._deo_settings_gesture_feed)
 
         # Startup self-heal: if Deo mode isn't armed, a prior crash/kill must not
         # have left Task Manager disabled or the machine otherwise locked down.
@@ -2225,8 +2229,10 @@ class ScreenBreakApp:
 
     def _deo_settings_gesture_feed(self, event) -> None:
         """Same hidden gesture as the lockout unlock, fed via a normal Tk
-        binding (active app-wide, not just during a lockout) so it can also
-        authorize disarming and editing Deo settings."""
+        binding so it can also authorize disarming and editing Deo settings.
+        Only bound while the settings window is open (see
+        _show_status_window / _close_status), so this can't pre-authorize an
+        attempt that hasn't actually started."""
         now = time.monotonic()
         buf = self._deo_settings_gesture_buffer
         buf.append((event.keysym, now))
@@ -2239,13 +2245,13 @@ class ScreenBreakApp:
         recent = tuple(k for k, _ in buf[-len(DEO_UNLOCK_KEYSYM_SEQUENCE):])
         if recent == DEO_UNLOCK_KEYSYM_SEQUENCE:
             buf.clear()
-            self._deo_authenticate_settings()
+            self._deo_begin_settings_auth()
 
     def _deo_authenticate_settings(self) -> None:
         """Unlocks Deo settings editing + disarm for the current settings-
-        window session. Deliberately quiet: no popup, just the fields
-        becoming editable and the badge tinting — nothing a child watching
-        over a shoulder would recognize as a distinct event."""
+        window session. No popup — the only visible cue is the badge tinting
+        and the fields becoming interactive, which is easy to miss at a
+        glance but not literally invisible to someone watching closely."""
         self._deo_settings_authenticated = True
         self._deo_set_settings_widgets_state("normal")
         badge = getattr(self, "_deo_badge", None)
@@ -2263,14 +2269,28 @@ class ScreenBreakApp:
                 pass
 
     def _deo_begin_unlock(self) -> None:
-        """Runs on the Tk main thread once the hidden gesture matches."""
+        """Runs on the Tk main thread once the hidden gesture matches during
+        an active lockout."""
         if not self._deo_locked:
             return
         pin = str(self.config.get("deo_unlock_pin", "") or "").strip()
         if pin:
-            self._deo_prompt_pin(pin)
+            self._deo_prompt_pin(pin, self._deo_unlock, lambda: self._deo_locked)
         else:
             self._deo_unlock()
+
+    def _deo_begin_settings_auth(self) -> None:
+        """Runs once the hidden gesture matches while the settings window is
+        open (see _deo_settings_gesture_feed). Same PIN-gating as a lockout
+        unlock — settings-edit/disarm is at least as sensitive as a temporary
+        unlock, so it gets the same second factor when one is configured."""
+        if self._status_win is None:
+            return
+        pin = str(self.config.get("deo_unlock_pin", "") or "").strip()
+        if pin:
+            self._deo_prompt_pin(pin, self._deo_authenticate_settings, lambda: self._status_win is not None)
+        else:
+            self._deo_authenticate_settings()
 
     def _deo_unlock(self) -> None:
         """Parent-authorized unlock: grant a grace window and clear the
@@ -2287,10 +2307,15 @@ class ScreenBreakApp:
         self._deo_locked = False
         self._deo_close_lockout()
 
-    def _deo_prompt_pin(self, expected_pin: str) -> None:
+    def _deo_prompt_pin(self, expected_pin: str, on_success: Callable[[], None],
+                         still_relevant: Callable[[], bool]) -> None:
         """Second-factor confirmation shown after the hidden gesture already
-        matched. The gesture is the real proof-of-parent; this is a light
-        extra check, so it deliberately has no attempt limiting."""
+        matched, for either lockout-unlock or settings-edit/disarm. The
+        gesture is the real proof-of-parent; this is a light extra check, so
+        it deliberately has no attempt limiting. `still_relevant` lets the
+        caller auto-dismiss this if whatever it was gating resolves on its
+        own while it's sitting open (lockout clears itself / settings window
+        closes)."""
         if self._deo_pin_win is not None:
             try:
                 self._deo_pin_win.lift()
@@ -2332,7 +2357,7 @@ class ScreenBreakApp:
         def submit(_event=None):
             if pin_var.get().strip() == expected_pin:
                 finish()
-                self._deo_unlock()
+                on_success()
             else:
                 err_var.set("Incorrect PIN")
                 pin_var.set("")
@@ -2345,11 +2370,13 @@ class ScreenBreakApp:
         entry.focus_set()
 
         def watchdog_close():
-            # Safety: if the lockout resolves some other way while this sits
-            # open, close it rather than leaving input permanently un-swallowed.
+            # Safety: if whatever this PIN prompt was gating resolves some
+            # other way while it sits open, close it rather than leaving
+            # input permanently un-swallowed (lockout case) or a stray
+            # prompt outliving its settings window (settings-auth case).
             if self._deo_pin_win is not win:
                 return
-            if not self._deo_locked:
+            if not still_relevant():
                 finish()
             else:
                 win.after(500, watchdog_close)
@@ -2433,15 +2460,20 @@ class ScreenBreakApp:
             use_hklm = bool(self.config.get("deo_use_hklm", False))
             if self._deo_set_task_mgr_disabled(True, use_hklm):
                 self._deo_task_mgr_disabled = True
+                # Remember exactly which hives we touched, so disable restores
+                # the same ones regardless of whether deo_use_hklm changes in
+                # between (it shouldn't be reachable mid-lockout, but this
+                # keeps the restore path correct even if that ever changes).
+                self._deo_task_mgr_hklm_active = use_hklm
 
     def _deo_disable_lockdown(self) -> None:
         if not IS_WIN:
             return
         self._deo_uninstall_keyboard_hook()
         if self._deo_task_mgr_disabled:
-            use_hklm = bool(self.config.get("deo_use_hklm", False))
-            self._deo_set_task_mgr_disabled(False, use_hklm)
+            self._deo_set_task_mgr_disabled(False, self._deo_task_mgr_hklm_active)
             self._deo_task_mgr_disabled = False
+            self._deo_task_mgr_hklm_active = False
 
     def _deo_emergency_restore(self) -> None:
         """Last-resort cleanup for crash/interrupt/disarm: never leave the
@@ -2459,6 +2491,7 @@ class ScreenBreakApp:
         except Exception:
             pass
         self._deo_task_mgr_disabled = False
+        self._deo_task_mgr_hklm_active = False
         try:
             if self._deo_audio_was_muted is not None:
                 self._deo_unmute_audio()
@@ -3681,8 +3714,15 @@ class ScreenBreakApp:
 
         # Deo mode: secret arm/disarm toggle (only fires while this panel is
         # focused) + a small "D" badge, shown only when armed, that the parent
-        # recognizes but never explains to the child.
+        # recognizes but never explains to the child. The hidden-gesture
+        # listener that authorizes disarm/settings-edit is only bound while
+        # this window is open (unbound in _close_status) — it must not be
+        # possible to pre-authorize a disarm attempt before one has actually
+        # started, and unrelated users of this app shouldn't get background
+        # key-tracking for a window that isn't even on screen.
         win.bind("<Alt-Shift-D>", self._deo_toggle_armed)
+        self.root.bind_all("<KeyPress-Scroll_Lock>", self._deo_settings_gesture_feed)
+        self.root.bind_all("<KeyPress-Pause>", self._deo_settings_gesture_feed)
         deo_badge_row = tk.Frame(win, bg=C_BG)
         deo_badge_row.pack(fill="x", pady=(6, 0), **pad)
         self._deo_badge = tk.Label(deo_badge_row, text="D", font=(FONT, 10, "bold"),
@@ -4659,6 +4699,11 @@ class ScreenBreakApp:
                 pass
             self._status_win = None
         self._deo_settings_authenticated = False
+        try:
+            self.root.unbind_all("<KeyPress-Scroll_Lock>")
+            self.root.unbind_all("<KeyPress-Pause>")
+        except tk.TclError:
+            pass
 
     def _toggle_status_window(self) -> None:
         """Toggle status window - close if open, open if closed."""
@@ -5822,25 +5867,32 @@ def _find_repo_root() -> Optional[str]:
 
 def check_for_updates() -> dict:
     """Fetch from origin and report whether the tracked branch is behind.
-    Read-only — never modifies the working tree."""
+    Read-only — never modifies the working tree (fetch only touches .git's
+    own internal refs/objects, not any checked-out file)."""
     repo = _find_repo_root()
     if not repo:
         return {"available": False, "reason": "not_a_git_checkout"}
     import subprocess
     try:
-        subprocess.run(["git", "fetch", "--quiet"], cwd=repo, timeout=20, check=True,
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        fetch = subprocess.run(["git", "fetch", "--quiet"], cwd=repo, timeout=20,
+                                capture_output=True, text=True)
+        if fetch.returncode != 0:
+            detail = (fetch.stderr or fetch.stdout or "").strip().splitlines()
+            return {"available": False, "reason": f"couldn't reach the remote ({detail[-1] if detail else 'git fetch failed'})"}
+    except subprocess.TimeoutExpired:
+        return {"available": False, "reason": "timed out reaching the remote"}
+    except FileNotFoundError:
+        return {"available": False, "reason": "git is not installed"}
+    try:
         local = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
                                 capture_output=True, text=True, timeout=10, check=True).stdout.strip()
         remote = subprocess.run(["git", "rev-parse", "@{u}"], cwd=repo,
                                  capture_output=True, text=True, timeout=10, check=True).stdout.strip()
         return {"available": local != remote, "repo": repo}
-    except subprocess.TimeoutExpired:
-        return {"available": False, "reason": "timed out reaching the remote"}
     except subprocess.CalledProcessError:
-        return {"available": False, "reason": "git error (no upstream configured?)"}
-    except FileNotFoundError:
-        return {"available": False, "reason": "git is not installed"}
+        return {"available": False, "reason": "no upstream branch configured"}
+    except subprocess.TimeoutExpired:
+        return {"available": False, "reason": "timed out reading local git state"}
 
 def apply_update_and_restart(repo: str) -> bool:
     """Fast-forward-only pull (never clobbers local edits) then relaunches.
