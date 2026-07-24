@@ -48,6 +48,10 @@ dependencies = [
     "screeninfo>=0.8",
 ]
 
+[project.optional-dependencies]
+# Only needed for Deo mode's system-audio mute on Windows; the app runs fine without it.
+deo = ["pycaw>=20240210; sys_platform == 'win32'"]
+
 [project.urls]
 Homepage = "https://github.com/turqoisehex/screen-break"
 Repository = "https://github.com/turqoisehex/screen-break"

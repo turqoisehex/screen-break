@@ -62,7 +62,7 @@ HAS_TRAY = _ensure_deps()
 
 # ─── Imports ──────────────────────────────────────────────────
 import threading, datetime, json, math, random, time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, NamedTuple, Optional
 
 try:
     from PIL import Image, ImageDraw, ImageFilter, ImageTk
@@ -99,10 +99,26 @@ if IS_WIN:
     except Exception:
         pass
 
+# Optional: system-audio mute for Deo mode lockouts. Not auto-installed like
+# pystray/Pillow — it's only needed by the hidden Deo feature, so we degrade
+# gracefully (skip muting) rather than force every user to install it.
+HAS_PYCAW = False
+if IS_WIN:
+    try:
+        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume
+        from comtypes import CLSCTX_ALL
+        HAS_PYCAW = True
+    except ImportError:
+        pass
+
 # ─── Parse Args ──────────────────────────────────────────────
 _parser = argparse.ArgumentParser(description="Screen Break break reminder")
 _parser.add_argument("--test", action="store_true", help="Use short intervals for testing")
-_args = _parser.parse_args()
+_parser.add_argument("--watchdog", action="store_true", help=argparse.SUPPRESS)
+_parser.add_argument("--deo-selftest", action="store_true", help=argparse.SUPPRESS)
+# parse_known_args (not parse_args): this module is imported by test runners and other
+# tooling with unrelated argv (e.g. `pytest tests/ -v`) — unrecognized args must not crash import.
+_args, _ = _parser.parse_known_args()
 TEST_MODE = _args.test
 
 # ─── Named Constants ─────────────────────────────────────────
@@ -117,6 +133,24 @@ WARNING_ICON_MARGIN = 18           # Margin from screen edge
 CONFIG_FILE = os.path.join(os.path.expanduser("~"), "screen_break_config.json")
 NOTES_FILE  = os.path.join(os.path.expanduser("~"), "screen_break_notes.json")
 STATS_FILE  = os.path.join(os.path.expanduser("~"), "screen_break_stats.json")
+DEO_LOCK_FILE = os.path.join(os.path.expanduser("~"), "screen_break_deo.lock")
+DEO_MAIN_MUTEX = "Global\\ScreenBreakDeo"
+DEO_WATCHDOG_MUTEX = "Global\\ScreenBreakDeoWatchdog"
+# Hidden parent-unlock gesture, checked during a lockout: Scroll Lock x3 then
+# Pause/Break, within an 8s window. Deliberately distinct from Alt+Shift+D
+# (the settings-panel arm/disarm toggle) and picked for keys a child is very
+# unlikely to press by accident while playing.
+DEO_VK_SCROLL = 0x91
+DEO_VK_PAUSE = 0x13
+DEO_UNLOCK_SEQUENCE = (DEO_VK_SCROLL, DEO_VK_SCROLL, DEO_VK_SCROLL, DEO_VK_PAUSE)
+DEO_UNLOCK_WINDOW_SECONDS = 8
+# Same gesture, expressed as Tk keysyms — used outside a lockout (settings-edit
+# and disarm authorization), where the OS-level hook isn't installed.
+DEO_UNLOCK_KEYSYM_SEQUENCE = ("Scroll_Lock", "Scroll_Lock", "Scroll_Lock", "Pause")
+# PIN is an extra, code-gated layer on top of the hidden gesture — off by
+# default, and with no UI surface at all while off, so there's nothing in
+# Settings that even hints a PIN exists unless a developer flips this.
+DEO_PIN_UI_ENABLED = False
 
 # ─── Idle Detection ───────────────────────────────────────────
 IDLE_CHECK_INTERVAL = 5  # Check idle every 5 seconds
@@ -607,6 +641,20 @@ DEFAULT_CONFIG = {
         {"time": "17:00", "duration": 30, "title": "Recovery Break"},
         {"time": "20:00", "duration":  0, "title": "Shutdown"},
     ],
+    # Deo mode: enforced screen-time limits (hidden feature, armed via secret gesture)
+    "deo_mode_enabled": False,            # master arm — toggled ONLY via Alt+Shift+D in settings
+    "deo_allowed_start": "09:00",
+    "deo_allowed_end": "18:00",
+    "deo_daily_limit_minutes": 120,
+    "deo_warn_ramp_minutes": 10,          # wind-down ramp begins this long before lockout
+    "deo_warn_final_minutes": 1,          # near-max-intensity threshold (still non-blocking)
+    "deo_next_activity": "",              # OPTIONAL first-then text; empty => generic calm copy
+    "deo_mute_audio_on_lock": True,       # mute system audio while locked out; restored on unlock
+    "deo_unlock_pin": "",                 # optional; empty => hidden gesture alone unlocks
+    "deo_lockdown_level": "maximum",      # maximum | strong | overlay
+    "deo_use_hklm": False,                # optional machine-wide policy (needs admin) — default off
+    "deo_autostart": True,
+    "deo_grace_minutes": 10,              # bonus granted per parent unlock during a lockout
 }
 
 def load_config() -> dict[str, Any]:
@@ -670,6 +718,7 @@ DEFAULT_STATS = {
     "streak_days": 0,
     "last_active_date": None,
     "daily_history": [],  # Last 7 days: [{"date": "YYYY-MM-DD", "eye": N, "micro": N, "scheduled": N}, ...]
+    "deo": {"date": "", "used_seconds": 0, "unlocks": 0, "bonus_seconds": 0, "override_until": None},
 }
 
 def load_stats() -> dict[str, Any]:
@@ -681,7 +730,7 @@ def load_stats() -> dict[str, Any]:
                 saved = json.load(f)
             if isinstance(saved, dict):
                 # Deep merge
-                for key in ["lifetime", "today"]:
+                for key in ["lifetime", "today", "deo"]:
                     if key in saved and isinstance(saved[key], dict):
                         stats[key].update(saved[key])
                 for key in ["streak_days", "last_active_date", "daily_history"]:
@@ -735,6 +784,116 @@ def update_stats_for_today(stats: dict[str, Any]) -> None:
         }
     stats["last_active_date"] = today
 
+    # Deo mode usage resets independently, keyed on its own date field
+    deo = stats.get("deo")
+    if not isinstance(deo, dict):
+        deo = json.loads(json.dumps(DEFAULT_STATS["deo"]))
+        stats["deo"] = deo
+    if deo.get("date") != today:
+        deo["date"] = today
+        deo["used_seconds"] = 0
+        deo["unlocks"] = 0
+        deo["bonus_seconds"] = 0
+        deo["override_until"] = None
+
+# ─── Deo Mode: pure decision engine ────────────────────────────
+# Side-effect-free by design: no Tk, no file I/O, no globals. This lets it be
+# unit-tested headlessly (see tests/test_deo.py) even though the app itself
+# only ever runs with a display.
+
+class DeoState:
+    ALLOWED = "allowed"
+    WARN = "warn"
+    LOCK = "lock"
+
+class DeoReason:
+    BEFORE_WINDOW = "before_window"
+    AFTER_WINDOW = "after_window"
+    BUDGET_EXHAUSTED = "budget_exhausted"
+
+class DeoDecision(NamedTuple):
+    state: str                    # DeoState.ALLOWED / WARN / LOCK
+    reason: Optional[str]         # DeoReason.* when state == LOCK, else None
+    remaining_seconds: float      # seconds until the next lockout (0 while locked)
+    ramp_intensity: float         # 0.0..1.0 wind-down intensity (0 outside the ramp, 1 at/after lockout)
+
+def _parse_hhmm_safe(s: str, fallback: datetime.time) -> datetime.time:
+    """Parse 'HH:MM' to datetime.time, falling back on any malformed input."""
+    try:
+        h, m = str(s).strip().split(":")
+        return datetime.time(int(h), int(m))
+    except (ValueError, AttributeError, TypeError):
+        return fallback
+
+def deo_decide(now: datetime.datetime, cfg: dict[str, Any], usage: dict[str, Any]) -> DeoDecision:
+    """Decide Deo mode's state for a given moment.
+
+    now: current datetime (naive, local time — matches the rest of the app)
+    cfg: app config dict (reads deo_allowed_start/end, deo_daily_limit_minutes,
+         deo_warn_ramp_minutes)
+    usage: today's usage dict, e.g. stats["deo"] — reads used_seconds/bonus_seconds/
+           override_until (an ISO datetime string, set by a parent's hidden unlock;
+           while now < override_until, this bypasses the window AND budget checks —
+           the unlock must work regardless of *why* it locked)
+    """
+    override_until = usage.get("override_until")
+    if override_until:
+        try:
+            override_dt = datetime.datetime.fromisoformat(override_until)
+        except (ValueError, TypeError):
+            override_dt = None
+        if override_dt and now < override_dt:
+            remaining = (override_dt - now).total_seconds()
+            ramp_minutes = cfg.get("deo_warn_ramp_minutes", 10)
+            if not isinstance(ramp_minutes, (int, float)) or ramp_minutes <= 0:
+                ramp_minutes = 10
+            ramp_seconds = ramp_minutes * 60
+            if remaining <= ramp_seconds:
+                linear = min(1.0, max(0.0, 1.0 - remaining / ramp_seconds))
+                return DeoDecision(DeoState.WARN, None, remaining, linear * linear)
+            return DeoDecision(DeoState.ALLOWED, None, remaining, 0.0)
+
+    start_t = _parse_hhmm_safe(cfg.get("deo_allowed_start", "09:00"), datetime.time(9, 0))
+    end_t = _parse_hhmm_safe(cfg.get("deo_allowed_end", "18:00"), datetime.time(18, 0))
+    start_dt = datetime.datetime.combine(now.date(), start_t)
+    end_dt = datetime.datetime.combine(now.date(), end_t)
+
+    if now < start_dt:
+        return DeoDecision(DeoState.LOCK, DeoReason.BEFORE_WINDOW, 0.0, 1.0)
+    if now >= end_dt:
+        return DeoDecision(DeoState.LOCK, DeoReason.AFTER_WINDOW, 0.0, 1.0)
+
+    limit_minutes = cfg.get("deo_daily_limit_minutes", 120)
+    if not isinstance(limit_minutes, (int, float)) or limit_minutes < 0:
+        limit_minutes = 120
+    limit_seconds = limit_minutes * 60
+
+    used = usage.get("used_seconds", 0)
+    used = used if isinstance(used, (int, float)) and used >= 0 else 0
+    bonus = usage.get("bonus_seconds", 0)
+    bonus = bonus if isinstance(bonus, (int, float)) and bonus >= 0 else 0
+
+    budget_left = limit_seconds + bonus - used
+    seconds_to_window_end = (end_dt - now).total_seconds()
+
+    if budget_left <= 0:
+        return DeoDecision(DeoState.LOCK, DeoReason.BUDGET_EXHAUSTED, 0.0, 1.0)
+
+    remaining = min(budget_left, seconds_to_window_end)
+
+    ramp_minutes = cfg.get("deo_warn_ramp_minutes", 10)
+    if not isinstance(ramp_minutes, (int, float)) or ramp_minutes <= 0:
+        ramp_minutes = 10
+    ramp_seconds = ramp_minutes * 60
+
+    if remaining <= ramp_seconds:
+        linear = 1.0 - (remaining / ramp_seconds)
+        linear = min(1.0, max(0.0, linear))
+        intensity = linear * linear  # ease-in so the final stretch dominates
+        return DeoDecision(DeoState.WARN, None, remaining, intensity)
+
+    return DeoDecision(DeoState.ALLOWED, None, remaining, 0.0)
+
 # ─── Descriptions ─────────────────────────────────────────────
 DESCS = {
     "Stretch Break": (
@@ -770,6 +929,9 @@ C_TEXT     = "#f1f5f9";  C_TEXT_DIM = "#94a3b8";  C_TEXT_MUT = "#64748b"
 C_EYE_BG  = "#0c1222";  C_EYE_ACC  = "#22d3ee";  C_CD       = "#fbbf24"
 C_W_BG    = "#1a1a2e";  C_W_GL     = "#0ea5e9"
 C_OK      = "#22c55e";  C_ERR      = "#ef4444";  C_GENTLE  = "#2dd4bf"
+# Deo mode: deliberately warm/calm, never alarm-red — a lockout should read as
+# "time for something else", not as a punishment or a warning of danger.
+C_DEO_BG   = "#2b2540";  C_DEO_ACC  = "#f2c98a";  C_DEO_TEXT = "#f5f0e8";  C_DEO_TEXT_DIM = "#c9bfd6"
 
 TICK = 10   # scheduler tick (seconds)
 
@@ -994,6 +1156,52 @@ class ScreenBreakApp:
         self.acked_today   = {};  self.today = datetime.date.today()
         self._warn_anim_id = None;  self._warn_rem = 0;  self._warn_total = 0
         self._status_win = None;  self._tip = None;  self._stats_win = None;  self._notes_win = None;  self._msg_editor_win = None
+
+        # Deo mode state (enforced screen-time limits; hidden feature, secret-gesture toggle)
+        self._deo_locked = False
+        self._deo_lock_reason = None
+        self._deo_overlays = []
+        self._deo_ramp_intensity = 0.0
+        self._deo_unsaved_ticks = 0
+        self._deo_audio_was_muted = None  # None = untouched; True/False = state to restore
+        # Wind-down ramp (non-blocking, escalating corner cue -> near-fullscreen)
+        self._deo_ramp_win = None
+        self._deo_ramp_canvas = None
+        self._deo_ramp_hwnd = None
+        self._deo_ramp_ct_active = False
+        self._deo_ramp_fast_after_id = None  # smooth 200ms updates during the final minute
+        self._deo_ramp_anchor_time = None
+        self._deo_ramp_anchor_remaining = 0.0
+        self._deo_ramp_last_chime_bucket = None
+        # Windows lockdown (keyboard hook + Task Manager policy)
+        self._deo_keyboard_hook = None
+        self._deo_hook_proc = None  # must stay referenced or ctypes GCs the callback -> crash
+        self._deo_task_mgr_disabled = False
+        self._deo_unlock_buffer = []  # recent keydowns, for hidden-gesture matching
+        self._deo_pin_prompt_active = False  # while True, the hook stops swallowing input
+        self._deo_pin_win = None
+        # Settings-edit / disarm authorization: requires the same hidden
+        # gesture as lockout-unlock, fed via a normal Tk binding since the
+        # OS-level hook only runs during an active lockout.
+        self._deo_settings_authenticated = False
+        self._deo_settings_gesture_buffer = []
+        self._deo_settings_widgets = []
+        self.root.bind_all("<KeyPress-Scroll_Lock>", self._deo_settings_gesture_feed)
+        self.root.bind_all("<KeyPress-Pause>", self._deo_settings_gesture_feed)
+
+        # Startup self-heal: if Deo mode isn't armed, a prior crash/kill must not
+        # have left Task Manager disabled or the machine otherwise locked down.
+        if IS_WIN and not self.config.get("deo_mode_enabled", False):
+            self._deo_set_task_mgr_disabled(False, True)
+        if IS_WIN:
+            import atexit
+            atexit.register(self._deo_emergency_restore)
+            try:
+                import signal
+                signal.signal(signal.SIGINT, lambda *_a: (self._deo_emergency_restore(), sys.exit(0)))
+                signal.signal(signal.SIGTERM, lambda *_a: (self._deo_emergency_restore(), sys.exit(0)))
+            except (ValueError, OSError):
+                pass  # e.g. not the main thread; atexit above still covers normal exit
 
         if HAS_TRAY and not IS_MAC:
             threading.Thread(target=self._run_tray, daemon=True).start()
@@ -1518,6 +1726,13 @@ class ScreenBreakApp:
         else:
             self.fullscreen_active = False
 
+        # Deo mode (Priority 0): must keep enforcing even while paused, idle, a
+        # fullscreen app is focused, or an ordinary break is mid-flight — those are
+        # exactly the states a child would use to dodge a lockout — so this runs
+        # unconditionally, ahead of the gate below that guards ordinary breaks.
+        if self.config.get("deo_mode_enabled", False):
+            self._deo_tick(datetime.datetime.now())
+
         # Safety valve: if warning_up is stuck but window is gone, clear it
         if self.warning_up and not self.warning_window:
             self.warning_up = False
@@ -1532,11 +1747,765 @@ class ScreenBreakApp:
                 self.overlay_up = False
                 self.current_overlay = None
 
-        # Skip break checking if paused, in break, idle, or in fullscreen focus mode
-        if not self.paused and not self.overlay_up and not self.warning_up and not self.idle:
+        # Skip break checking if paused, in break, idle, in fullscreen focus mode,
+        # or Deo-locked (a Deo lockout supersedes and suppresses ordinary breaks).
+        if (not self.paused and not self.overlay_up and not self.warning_up
+                and not self.idle and not self._deo_locked):
             if not (self.config.get("focus_mode", True) and self.fullscreen_active):
                 self._check()
         self.root.after(TICK * 1000, self._tick)
+
+    # ━━━ Deo mode (enforced screen-time limits) ━━━━━━━━━━━━━━━
+    def _deo_tick(self, now: datetime.datetime) -> None:
+        """Priority-0 evaluation for Deo mode. Called every tick from _tick(),
+        unconditionally — see the comment there for why."""
+        update_stats_for_today(self.stats)  # cheap + idempotent; rolls deo usage at midnight
+        deo = self.stats.setdefault("deo", json.loads(json.dumps(DEFAULT_STATS["deo"])))
+
+        decision = deo_decide(now, self.config, deo)
+        if decision.state != DeoState.LOCK and not self.idle:
+            deo["used_seconds"] = deo.get("used_seconds", 0) + TICK
+            self._deo_unsaved_ticks += 1
+            if self._deo_unsaved_ticks >= max(1, 60 // TICK):
+                self._deo_unsaved_ticks = 0
+                save_stats(self.stats)
+            # Re-decide: if this tick's usage just exhausted the budget, lock
+            # immediately rather than waiting for the next tick.
+            decision = deo_decide(now, self.config, deo)
+
+        if decision.state == DeoState.LOCK:
+            if self._deo_ramp_intensity:
+                self._deo_ramp_intensity = 0.0
+                self._deo_teardown_ramp()
+            self._deo_locked = True
+            self._show_deo_lockout(decision.reason)
+        elif decision.state == DeoState.WARN:
+            if self._deo_locked:
+                self._deo_locked = False
+                self._deo_close_lockout()
+            self._deo_ramp_intensity = decision.ramp_intensity
+            self._deo_update_ramp(decision.ramp_intensity, decision.remaining_seconds)
+        else:  # ALLOWED
+            if self._deo_locked:
+                self._deo_locked = False
+                self._deo_close_lockout()
+            if self._deo_ramp_intensity:
+                self._deo_ramp_intensity = 0.0
+                self._deo_teardown_ramp()
+
+    def _show_deo_lockout(self, reason: Optional[str]) -> None:
+        """Fullscreen, unskippable lockout covering every monitor. Safe to call
+        every tick while locked — self-heals if a window was destroyed out from
+        under it (e.g. by whatever escaped the keyboard block)."""
+        self._deo_lock_reason = reason
+
+        if self._deo_overlays:
+            alive = True
+            for w in self._deo_overlays:
+                try:
+                    if not w.winfo_exists():
+                        alive = False
+                        break
+                except tk.TclError:
+                    alive = False
+                    break
+            if alive:
+                return  # already showing; the reassert loop keeps it on top
+            self._deo_teardown_overlays()
+
+        if self.config.get("sound_enabled", True):
+            play_sound("chime")
+        if self.config.get("deo_mute_audio_on_lock", True):
+            self._deo_mute_audio()
+        self._deo_enable_lockdown()
+
+        monitors = get_all_monitors()
+        overlays = []
+        for (mx, my, mw, mh) in monitors:
+            ov = tk.Toplevel(self.root)
+            ov.configure(bg=C_DEO_BG)
+            ov.overrideredirect(True)
+            sw = mw if mw else ov.winfo_screenwidth()
+            sh = mh if mh else ov.winfo_screenheight()
+            ov.geometry(f"{sw}x{sh}+{mx}+{my}")
+            try:
+                ov.attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            ov.protocol("WM_DELETE_WINDOW", lambda: None)
+            ov.bind("<Escape>", lambda e: None)
+            ov.bind("<Alt-F4>", lambda e: None)
+            overlays.append(ov)
+        self._deo_overlays = overlays
+
+        primary = overlays[0]
+        cf = tk.Frame(primary, bg=C_DEO_BG)
+        cf.place(relx=0.5, rely=0.5, anchor="center")
+        tk.Label(cf, text="\U0001F319", font=(FONT, 56), fg=C_DEO_ACC, bg=C_DEO_BG).pack(pady=(0, 16))
+
+        if reason in (DeoReason.BEFORE_WINDOW, DeoReason.AFTER_WINDOW):
+            start_12 = self._fmt12(self.config.get("deo_allowed_start", "09:00"))
+            headline = "All done with screens for now"
+            sub = f"Screens come back at {start_12}"
+        else:  # BUDGET_EXHAUSTED
+            headline = "All done with screens for today"
+            sub = "Time for something else for now"
+
+        tk.Label(cf, text=headline, font=(FONT, 30, "bold"), fg=C_DEO_TEXT, bg=C_DEO_BG).pack(pady=(0, 10))
+        tk.Label(cf, text=sub, font=(FONT, 18), fg=C_DEO_TEXT_DIM, bg=C_DEO_BG).pack(pady=(0, 8))
+
+        next_activity = str(self.config.get("deo_next_activity", "") or "").strip()
+        if next_activity:
+            tk.Label(cf, text=f"Next: {next_activity}", font=(FONT, 16, "italic"),
+                     fg=C_DEO_ACC, bg=C_DEO_BG).pack(pady=(14, 0))
+
+        for sec_ov in overlays[1:]:
+            tk.Label(sec_ov, text="\U0001F319", font=(FONT, 40), fg=C_DEO_ACC,
+                     bg=C_DEO_BG).place(relx=0.5, rely=0.5, anchor="center")
+
+        for ov in overlays:
+            ov.lift()
+        primary.focus_force()
+        self._deo_reassert_topmost()
+
+    def _deo_reassert_topmost(self) -> None:
+        """Repeatedly re-lifts the lockout so other topmost windows or an
+        Alt+Tab focus steal can't bury it. Self-stops once unlocked.
+        Skips lifting/focusing while the PIN prompt is open — otherwise this
+        would fight it for focus every 200ms and the parent couldn't type."""
+        if not self._deo_locked:
+            return
+        if self._deo_pin_win is None:
+            for ov in list(self._deo_overlays):
+                try:
+                    if ov.winfo_exists():
+                        ov.lift()
+                        ov.attributes("-topmost", True)
+                except tk.TclError:
+                    pass
+            if self._deo_overlays:
+                try:
+                    self._deo_overlays[0].focus_force()
+                except tk.TclError:
+                    pass
+        self.root.after(200, self._deo_reassert_topmost)
+
+    def _deo_teardown_overlays(self) -> None:
+        for ov in self._deo_overlays:
+            try:
+                ov.destroy()
+            except tk.TclError:
+                pass
+        self._deo_overlays = []
+
+    def _deo_close_lockout(self) -> None:
+        """Tear down the lockout and restore everything it changed. Called on
+        unlock, on transition back to ALLOWED/WARN, on disarm, and on exit —
+        must never leave the machine in a locked-down state."""
+        self._deo_teardown_overlays()
+        self._deo_disable_lockdown()
+        if self._deo_audio_was_muted is not None:
+            self._deo_unmute_audio()
+
+    # -- Escalating wind-down ramp ───────────────────────────────
+    # Non-blocking the whole way through: a subtle corner cue at the ramp's
+    # start grows smoothly into a near-fullscreen countdown by the final
+    # minute, click-through on Windows so the child can keep playing and
+    # pause/save on their own before the real lockout lands.
+    @staticmethod
+    def _deo_lerp_color(c1: str, c2: str, t: float) -> str:
+        t = min(1.0, max(0.0, t))
+        r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+        r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+        r = int(r1 + (r2 - r1) * t)
+        g = int(g1 + (g2 - g1) * t)
+        b = int(b1 + (b2 - b1) * t)
+        return f"#{r:02x}{g:02x}{b:02x}"
+
+    def _deo_ramp_win_alive(self) -> bool:
+        if self._deo_ramp_win is None:
+            return False
+        try:
+            return bool(self._deo_ramp_win.winfo_exists())
+        except tk.TclError:
+            return False
+
+    def _deo_ramp_set_click_through(self, enable: bool) -> None:
+        """Toggle WS_EX_TRANSPARENT so clicks pass through to whatever's
+        underneath (Windows only — no cross-platform equivalent)."""
+        if not IS_WIN or not self._deo_ramp_hwnd:
+            return
+        try:
+            GWL_EXSTYLE = -20
+            WS_EX_TRANSPARENT = 0x00000020
+            WS_EX_LAYERED = 0x00080000
+            style = ctypes.windll.user32.GetWindowLongW(self._deo_ramp_hwnd, GWL_EXSTYLE)
+            if enable:
+                style |= WS_EX_TRANSPARENT | WS_EX_LAYERED
+            else:
+                style &= ~WS_EX_TRANSPARENT
+            ctypes.windll.user32.SetWindowLongW(self._deo_ramp_hwnd, GWL_EXSTYLE, style)
+            self._deo_ramp_ct_active = enable
+        except Exception:
+            pass
+
+    def _deo_maybe_play_ramp_chime(self, intensity: float, remaining_seconds: float) -> None:
+        """Escalating chime cadence: sparse and soft far out, more frequent
+        approaching the final minute, once per second (sharper tone) in the
+        final 10s. Gradual and identical every day — never a sudden jump."""
+        if not self.config.get("sound_enabled", True):
+            return
+        rem = max(0, int(round(remaining_seconds)))
+        if rem <= 10:
+            bucket, sound = ("final", rem), "warning"
+        elif rem <= 60:
+            bucket, sound = ("close", rem // 15), ("warning" if intensity > 0.85 else "chime")
+        else:
+            bucket, sound = ("far", rem // 60), "chime"
+        if bucket == self._deo_ramp_last_chime_bucket:
+            return
+        self._deo_ramp_last_chime_bucket = bucket
+        play_sound(sound)
+
+    def _deo_render_ramp(self, intensity: float, remaining_seconds: float) -> None:
+        intensity = min(1.0, max(0.0, intensity))
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+
+        start_w, start_h = 170, 110
+        end_w, end_h = int(screen_w * 0.9), int(screen_h * 0.9)
+        w = int(start_w + (end_w - start_w) * intensity)
+        h = int(start_h + (end_h - start_h) * intensity)
+        margin = 24
+        start_x, start_y = screen_w - start_w - margin, screen_h - start_h - margin
+        end_x, end_y = (screen_w - end_w) // 2, (screen_h - end_h) // 2
+        x = int(start_x + (end_x - start_x) * intensity)
+        y = int(start_y + (end_y - start_y) * intensity)
+        alpha = 0.35 + 0.62 * intensity
+        bg = self._deo_lerp_color("#3a3550", C_DEO_BG, min(1.0, intensity * 1.3))
+
+        if not self._deo_ramp_win_alive():
+            win = tk.Toplevel(self.root)
+            win.overrideredirect(True)
+            try:
+                win.attributes("-topmost", True)
+            except tk.TclError:
+                pass
+            canvas = tk.Canvas(win, highlightthickness=0)
+            canvas.pack(fill="both", expand=True)
+            self._deo_ramp_win = win
+            self._deo_ramp_canvas = canvas
+            self._deo_ramp_hwnd = None
+            self._deo_ramp_ct_active = False
+            if IS_WIN:
+                try:
+                    win.update_idletasks()
+                    GA_ROOT = 2
+                    self._deo_ramp_hwnd = ctypes.windll.user32.GetAncestor(win.winfo_id(), GA_ROOT)
+                    self._deo_ramp_set_click_through(True)
+                except Exception:
+                    self._deo_ramp_hwnd = None
+
+        win = self._deo_ramp_win
+        try:
+            win.geometry(f"{w}x{h}+{x}+{y}")
+            win.attributes("-alpha", alpha)
+        except tk.TclError:
+            return
+
+        canvas = self._deo_ramp_canvas
+        canvas.configure(bg=bg)
+        canvas.delete("all")
+
+        mins, secs = divmod(max(0, int(round(remaining_seconds))), 60)
+        font_size = max(14, int(14 + 46 * intensity))
+        fg = self._deo_lerp_color(C_DEO_TEXT_DIM, C_DEO_ACC, intensity)
+        canvas.create_text(w // 2, h // 2, text=f"{mins}:{secs:02d}", fill=fg,
+                            font=(FONT, font_size, "bold"))
+
+        final_secs = max(1, self.config.get("deo_warn_final_minutes", 1)) * 60
+        if remaining_seconds <= final_secs:
+            sub = "Screens off now — you can pause or save"
+        elif intensity > 0.5:
+            sub = "Screens off soon"
+        else:
+            sub = None
+        if sub:
+            canvas.create_text(w // 2, h // 2 + font_size // 2 + 16, text=sub,
+                                fill=C_DEO_TEXT_DIM, font=(FONT, max(11, int(font_size * 0.35))))
+
+        win.lift()
+        self._deo_maybe_play_ramp_chime(intensity, remaining_seconds)
+
+    def _deo_ramp_fast_tick(self) -> None:
+        """Smooth ~200ms updates during the final minute, extrapolated from the
+        last authoritative (10s-cadence) sample so the countdown doesn't visibly
+        stall between _deo_tick calls."""
+        self._deo_ramp_fast_after_id = None
+        if self._deo_locked or self._deo_ramp_intensity <= 0 or self._deo_ramp_anchor_time is None:
+            return
+        elapsed = (datetime.datetime.now() - self._deo_ramp_anchor_time).total_seconds()
+        remaining = max(0.0, self._deo_ramp_anchor_remaining - elapsed)
+        ramp_seconds = max(1, self.config.get("deo_warn_ramp_minutes", 10)) * 60
+        linear = min(1.0, max(0.0, 1.0 - remaining / ramp_seconds))
+        intensity = linear * linear
+        self._deo_render_ramp(intensity, remaining)
+
+        final_secs = max(1, self.config.get("deo_warn_final_minutes", 1)) * 60
+        if remaining <= final_secs and remaining > 0:
+            self._deo_ramp_fast_after_id = self.root.after(200, self._deo_ramp_fast_tick)
+
+    def _deo_update_ramp(self, intensity: float, remaining_seconds: float) -> None:
+        """Authoritative update, called every ~10s tick from _deo_tick."""
+        self._deo_ramp_anchor_time = datetime.datetime.now()
+        self._deo_ramp_anchor_remaining = remaining_seconds
+        self._deo_render_ramp(intensity, remaining_seconds)
+
+        final_secs = max(1, self.config.get("deo_warn_final_minutes", 1)) * 60
+        if remaining_seconds <= final_secs and self._deo_ramp_fast_after_id is None:
+            self._deo_ramp_fast_after_id = self.root.after(200, self._deo_ramp_fast_tick)
+
+    def _deo_teardown_ramp(self) -> None:
+        if self._deo_ramp_fast_after_id is not None:
+            try:
+                self.root.after_cancel(self._deo_ramp_fast_after_id)
+            except Exception:
+                pass
+            self._deo_ramp_fast_after_id = None
+        if self._deo_ramp_win is not None:
+            try:
+                self._deo_ramp_win.destroy()
+            except tk.TclError:
+                pass
+        self._deo_ramp_win = None
+        self._deo_ramp_canvas = None
+        self._deo_ramp_hwnd = None
+        self._deo_ramp_anchor_time = None
+        self._deo_ramp_last_chime_bucket = None
+
+    # -- System audio mute on lockout ───────────────────────────
+    # Uses pycaw's absolute SetMute (not a toggle key) so it can never guess
+    # wrong about the prior state. Without pycaw we have no reliable way to
+    # *read* the current mute state, and a blind toggle risks doing the
+    # opposite of what's intended (unmuting instead of muting) — so we skip
+    # muting entirely rather than take that risk.
+    def _deo_mute_audio(self) -> None:
+        if not IS_WIN or not HAS_PYCAW or self._deo_audio_was_muted is not None:
+            return
+        try:
+            speakers = AudioUtilities.GetSpeakers()
+            interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            volume = interface.QueryInterface(IAudioEndpointVolume)
+            self._deo_audio_was_muted = bool(volume.GetMute())
+            if not self._deo_audio_was_muted:
+                volume.SetMute(1, None)
+        except Exception:
+            self._deo_audio_was_muted = None  # failed; nothing to restore later
+
+    def _deo_unmute_audio(self) -> None:
+        if self._deo_audio_was_muted is None:
+            return
+        if IS_WIN and HAS_PYCAW:
+            try:
+                speakers = AudioUtilities.GetSpeakers()
+                interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+                volume = interface.QueryInterface(IAudioEndpointVolume)
+                volume.SetMute(1 if self._deo_audio_was_muted else 0, None)
+            except Exception:
+                pass
+        self._deo_audio_was_muted = None
+
+    # -- Windows keyboard lockdown + Task Manager disable ───────
+    # Both mechanisms work per-user (HKCU) without admin/UAC — no prompt the
+    # child would see. HKLM (machine-wide) is optional and needs admin; it's
+    # attempted only if deo_use_hklm is on, and a PermissionError there is
+    # expected/harmless when not elevated.
+    def _deo_set_task_mgr_disabled(self, disabled: bool, use_hklm: bool = False) -> bool:
+        if not IS_WIN:
+            return False
+        import winreg
+        hives = [winreg.HKEY_CURRENT_USER]
+        if use_hklm:
+            hives.append(winreg.HKEY_LOCAL_MACHINE)
+        ok = True
+        for hive in hives:
+            try:
+                key = winreg.CreateKeyEx(
+                    hive, r"Software\Microsoft\Windows\CurrentVersion\Policies\System",
+                    0, winreg.KEY_SET_VALUE)
+                try:
+                    if disabled:
+                        winreg.SetValueEx(key, "DisableTaskMgr", 0, winreg.REG_DWORD, 1)
+                    else:
+                        try:
+                            winreg.DeleteValue(key, "DisableTaskMgr")
+                        except FileNotFoundError:
+                            pass
+                finally:
+                    winreg.CloseKey(key)
+            except PermissionError:
+                if hive == winreg.HKEY_LOCAL_MACHINE:
+                    pass  # expected without admin; HKCU alone is enough for "maximum"
+                else:
+                    ok = False
+            except OSError:
+                ok = False
+        return ok
+
+    def _deo_install_keyboard_hook(self) -> None:
+        """WH_KEYBOARD_LL hook: while locked, swallows every key unconditionally
+        (matched keys are swallowed too — nothing typed during the gesture should
+        leak to whatever's behind the lockout). The hidden unlock gesture is
+        detected purely from the raw vkCode stream inside this callback, not by
+        letting keys reach a Tk widget. Must run on the main thread (Tk's
+        mainloop pumps the Windows message queue that drives hook callbacks)."""
+        if not IS_WIN or self._deo_keyboard_hook:
+            return
+        try:
+            class KBDLLHOOKSTRUCT(ctypes.Structure):
+                _fields_ = [
+                    ("vkCode", ctypes.c_ulong), ("scanCode", ctypes.c_ulong),
+                    ("flags", ctypes.c_ulong), ("time", ctypes.c_ulong),
+                    ("dwExtraInfo", ctypes.c_void_p),
+                ]
+            WH_KEYBOARD_LL = 13
+            HC_ACTION = 0
+            WM_KEYDOWN, WM_SYSKEYDOWN = 0x0100, 0x0104
+
+            HOOKPROC = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_void_p)
+
+            def _raw_hook(nCode, wParam, lParam):
+                try:
+                    if nCode == HC_ACTION and self._deo_locked and not self._deo_pin_prompt_active:
+                        kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+                        if wParam in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                            self._deo_feed_unlock_key(kb.vkCode)
+                        return 1  # swallow everything while locked
+                except Exception:
+                    pass  # a bug here must never lock the keyboard forever -> fail open
+                return ctypes.windll.user32.CallNextHookEx(None, nCode, wParam, lParam)
+
+            self._deo_hook_proc = HOOKPROC(_raw_hook)
+            hmod = ctypes.windll.kernel32.GetModuleHandleW(None)
+            self._deo_keyboard_hook = ctypes.windll.user32.SetWindowsHookExW(
+                WH_KEYBOARD_LL, self._deo_hook_proc, hmod, 0)
+            if not self._deo_keyboard_hook:
+                self._deo_hook_proc = None
+        except Exception:
+            self._deo_keyboard_hook = None
+            self._deo_hook_proc = None
+
+    def _deo_uninstall_keyboard_hook(self) -> None:
+        if not IS_WIN or not self._deo_keyboard_hook:
+            return
+        try:
+            ctypes.windll.user32.UnhookWindowsHookEx(self._deo_keyboard_hook)
+        except Exception:
+            pass
+        self._deo_keyboard_hook = None
+        self._deo_hook_proc = None
+
+    def _deo_feed_unlock_key(self, vk_code: int) -> None:
+        """Tracks recent keydowns for the hidden parent-unlock gesture. Runs
+        inside the low-level keyboard hook callback — keep this fast and
+        exception-safe; never raise out of here."""
+        now = time.monotonic()
+        buf = self._deo_unlock_buffer
+        buf.append((vk_code, now))
+        cutoff = now - DEO_UNLOCK_WINDOW_SECONDS
+        while buf and buf[0][1] < cutoff:
+            buf.pop(0)
+        keep = len(DEO_UNLOCK_SEQUENCE) * 3
+        if len(buf) > keep:
+            del buf[:len(buf) - keep]
+        recent = tuple(c for c, _ in buf[-len(DEO_UNLOCK_SEQUENCE):])
+        if recent == DEO_UNLOCK_SEQUENCE:
+            buf.clear()
+            self.root.after(0, self._deo_begin_unlock)
+
+    def _deo_settings_gesture_feed(self, event) -> None:
+        """Same hidden gesture as the lockout unlock, fed via a normal Tk
+        binding (active app-wide, not just during a lockout) so it can also
+        authorize disarming and editing Deo settings."""
+        now = time.monotonic()
+        buf = self._deo_settings_gesture_buffer
+        buf.append((event.keysym, now))
+        cutoff = now - DEO_UNLOCK_WINDOW_SECONDS
+        while buf and buf[0][1] < cutoff:
+            buf.pop(0)
+        keep = len(DEO_UNLOCK_KEYSYM_SEQUENCE) * 3
+        if len(buf) > keep:
+            del buf[:len(buf) - keep]
+        recent = tuple(k for k, _ in buf[-len(DEO_UNLOCK_KEYSYM_SEQUENCE):])
+        if recent == DEO_UNLOCK_KEYSYM_SEQUENCE:
+            buf.clear()
+            self._deo_authenticate_settings()
+
+    def _deo_authenticate_settings(self) -> None:
+        """Unlocks Deo settings editing + disarm for the current settings-
+        window session. Deliberately quiet: no popup, just the fields
+        becoming editable and the badge tinting — nothing a child watching
+        over a shoulder would recognize as a distinct event."""
+        self._deo_settings_authenticated = True
+        self._deo_set_settings_widgets_state("normal")
+        badge = getattr(self, "_deo_badge", None)
+        if badge is not None:
+            try:
+                badge.configure(fg=C_OK)
+            except tk.TclError:
+                pass
+
+    def _deo_set_settings_widgets_state(self, state: str) -> None:
+        for w in self._deo_settings_widgets:
+            try:
+                w.configure(state=state)
+            except tk.TclError:
+                pass
+
+    def _deo_begin_unlock(self) -> None:
+        """Runs on the Tk main thread once the hidden gesture matches."""
+        if not self._deo_locked:
+            return
+        pin = str(self.config.get("deo_unlock_pin", "") or "").strip()
+        if pin:
+            self._deo_prompt_pin(pin)
+        else:
+            self._deo_unlock()
+
+    def _deo_unlock(self) -> None:
+        """Parent-authorized unlock: grant a grace window and clear the
+        lockout. Works no matter *why* it locked (time window or budget) —
+        override_until bypasses both in deo_decide."""
+        deo = self.stats.setdefault("deo", json.loads(json.dumps(DEFAULT_STATS["deo"])))
+        grace_min = self.config.get("deo_grace_minutes", 10)
+        if not isinstance(grace_min, (int, float)) or grace_min <= 0:
+            grace_min = 10
+        until = datetime.datetime.now() + datetime.timedelta(minutes=grace_min)
+        deo["override_until"] = until.isoformat()
+        deo["unlocks"] = deo.get("unlocks", 0) + 1
+        save_stats(self.stats)
+        self._deo_locked = False
+        self._deo_close_lockout()
+
+    def _deo_prompt_pin(self, expected_pin: str) -> None:
+        """Second-factor confirmation shown after the hidden gesture already
+        matched. The gesture is the real proof-of-parent; this is a light
+        extra check, so it deliberately has no attempt limiting."""
+        if self._deo_pin_win is not None:
+            try:
+                self._deo_pin_win.lift()
+                self._deo_pin_win.focus_force()
+                return
+            except tk.TclError:
+                self._deo_pin_win = None
+
+        self._deo_pin_prompt_active = True  # tells the hook to stop swallowing so this is typable
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        try:
+            win.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        win.configure(bg=C_CARD)
+        sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+        w, h = 320, 150
+        win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+        self._deo_pin_win = win
+
+        tk.Label(win, text="Parent PIN", font=(FONT, 14, "bold"), fg=C_TEXT, bg=C_CARD).pack(pady=(18, 6))
+        pin_var = tk.StringVar()
+        entry = tk.Entry(win, textvariable=pin_var, show="*", font=(MONO, 18), justify="center",
+                          bg=C_CARD_IN, fg=C_TEXT, insertbackground=C_TEXT, relief="flat")
+        entry.pack(pady=6, ipady=4, padx=30, fill="x")
+        err_var = tk.StringVar()
+        tk.Label(win, textvariable=err_var, font=(FONT, 10), fg=C_ERR, bg=C_CARD).pack()
+
+        def finish():
+            self._deo_pin_prompt_active = False
+            try:
+                win.destroy()
+            except tk.TclError:
+                pass
+            if self._deo_pin_win is win:
+                self._deo_pin_win = None
+
+        def submit(_event=None):
+            if pin_var.get().strip() == expected_pin:
+                finish()
+                self._deo_unlock()
+            else:
+                err_var.set("Incorrect PIN")
+                pin_var.set("")
+
+        entry.bind("<Return>", submit)
+        entry.bind("<Escape>", lambda _e: finish())
+        win.protocol("WM_DELETE_WINDOW", finish)
+        win.lift()
+        win.focus_force()
+        entry.focus_set()
+
+        def watchdog_close():
+            # Safety: if the lockout resolves some other way while this sits
+            # open, close it rather than leaving input permanently un-swallowed.
+            if self._deo_pin_win is not win:
+                return
+            if not self._deo_locked:
+                finish()
+            else:
+                win.after(500, watchdog_close)
+        win.after(500, watchdog_close)
+
+    def _deo_toggle_armed(self, event=None) -> str:
+        """Alt+Shift+D on the settings panel: the only way Deo mode is armed
+        or disarmed. Deliberately not exposed anywhere else. Arming is always
+        allowed; disarming additionally requires the hidden gesture (same one
+        used to unlock a lockout) so a child who stumbles onto this keystroke
+        still can't turn it off."""
+        new_state = not self.config.get("deo_mode_enabled", False)
+        if not new_state and not self._deo_settings_authenticated:
+            return "break"  # attempting to disarm without the gesture: silently refuse
+        self.config["deo_mode_enabled"] = new_state
+        save_config(self.config)
+        if new_state:
+            self.paused = False  # Deo mode must never be bypassable via Pause
+            self._deo_set_autostart(True)
+            _deo_write_lock_file(True)
+            self._deo_start_watchdog()
+        else:
+            self._deo_set_autostart(False)
+            _deo_write_lock_file(False)
+            if self._deo_ramp_intensity:
+                self._deo_ramp_intensity = 0.0
+                self._deo_teardown_ramp()
+            self._deo_locked = False
+            self._deo_close_lockout()
+            self._deo_emergency_restore()
+        self._deo_update_badge()
+        return "break"
+
+    def _deo_update_badge(self) -> None:
+        armed = self.config.get("deo_mode_enabled", False)
+        badge = getattr(self, "_deo_badge", None)
+        if badge is not None:
+            try:
+                if armed:
+                    badge.pack(side="left")
+                else:
+                    badge.pack_forget()
+            except tk.TclError:
+                self._deo_badge = None
+        frame = getattr(self, "_deo_settings_frame", None)
+        if frame is not None:
+            try:
+                if armed:
+                    frame.pack(fill="both")
+                else:
+                    frame.pack_forget()
+            except tk.TclError:
+                self._deo_settings_frame = None
+        if armed:
+            self._deo_update_readout()
+
+    def _deo_update_readout(self) -> None:
+        var = getattr(self, "_deo_readout_var", None)
+        if var is None:
+            return
+        deo = self.stats.get("deo", {})
+        used_total_min = int(deo.get("used_seconds", 0)) // 60
+        h, m = divmod(used_total_min, 60)
+        used_txt = f"{h}h {m:02d}m" if h else f"{m}m"
+        limit_m = self.config.get("deo_daily_limit_minutes", 120)
+        start = self._fmt12(self.config.get("deo_allowed_start", "09:00"))
+        end = self._fmt12(self.config.get("deo_allowed_end", "18:00"))
+        unlocks = deo.get("unlocks", 0)
+        bonus_m = int(deo.get("bonus_seconds", 0)) // 60
+        bonus_txt = f" (+{bonus_m}m bonus)" if bonus_m else ""
+        var.set(f"Used today: {used_txt}{bonus_txt} / {limit_m}m · window {start}–{end} · unlocks {unlocks}")
+
+    def _deo_enable_lockdown(self) -> None:
+        if not IS_WIN:
+            return
+        level = self.config.get("deo_lockdown_level", "maximum")
+        if level == "overlay":
+            return
+        self._deo_install_keyboard_hook()
+        if level == "maximum" and not self._deo_task_mgr_disabled:
+            use_hklm = bool(self.config.get("deo_use_hklm", False))
+            if self._deo_set_task_mgr_disabled(True, use_hklm):
+                self._deo_task_mgr_disabled = True
+
+    def _deo_disable_lockdown(self) -> None:
+        if not IS_WIN:
+            return
+        self._deo_uninstall_keyboard_hook()
+        if self._deo_task_mgr_disabled:
+            use_hklm = bool(self.config.get("deo_use_hklm", False))
+            self._deo_set_task_mgr_disabled(False, use_hklm)
+            self._deo_task_mgr_disabled = False
+
+    def _deo_emergency_restore(self) -> None:
+        """Last-resort cleanup for crash/interrupt/disarm: never leave the
+        keyboard hooked, Task Manager disabled, or audio muted. Idempotent —
+        safe to call repeatedly (atexit + signal handlers + normal teardown).
+        NOTE: this only runs on a graceful exit path; a hard kill (taskkill /F,
+        Task Manager's End Task) bypasses Python entirely, which is why the
+        startup self-heal in __init__ is the real backstop for that case."""
+        try:
+            self._deo_uninstall_keyboard_hook()
+        except Exception:
+            pass
+        try:
+            self._deo_set_task_mgr_disabled(False, True)  # clear both hives defensively
+        except Exception:
+            pass
+        self._deo_task_mgr_disabled = False
+        try:
+            if self._deo_audio_was_muted is not None:
+                self._deo_unmute_audio()
+        except Exception:
+            pass
+
+    # -- Persistence: autostart + watchdog ───────────────────────
+    def _deo_autostart_command(self) -> str:
+        """Launch command for the Run key — handles both a frozen PyInstaller
+        EXE and a plain `python screen_break.py` invocation."""
+        if getattr(sys, "frozen", False):
+            return f'"{sys.executable}"'
+        return f'"{sys.executable}" "{os.path.abspath(__file__)}"'
+
+    def _deo_set_autostart(self, enabled: bool) -> None:
+        if not IS_WIN:
+            return
+        import winreg
+        try:
+            key = winreg.CreateKeyEx(
+                winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run",
+                0, winreg.KEY_SET_VALUE)
+            try:
+                if enabled:
+                    winreg.SetValueEx(key, "ScreenBreak", 0, winreg.REG_SZ, self._deo_autostart_command())
+                else:
+                    try:
+                        winreg.DeleteValue(key, "ScreenBreak")
+                    except FileNotFoundError:
+                        pass
+            finally:
+                winreg.CloseKey(key)
+        except OSError:
+            pass
+
+    def _deo_start_watchdog(self) -> None:
+        """Spawn the guardian process if one isn't already running for this user."""
+        if not IS_WIN or _deo_mutex_exists(DEO_WATCHDOG_MUTEX):
+            return
+        try:
+            import subprocess
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NO_WINDOW = 0x08000000
+            subprocess.Popen(_deo_launch_args() + ["--watchdog"],
+                              creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW, close_fds=True)
+        except Exception:
+            pass
 
     def _check(self) -> None:
         now = datetime.datetime.now()
@@ -2710,6 +3679,17 @@ class ScreenBreakApp:
 
         pad = dict(padx=20)
 
+        # Deo mode: secret arm/disarm toggle (only fires while this panel is
+        # focused) + a small "D" badge, shown only when armed, that the parent
+        # recognizes but never explains to the child.
+        win.bind("<Alt-Shift-D>", self._deo_toggle_armed)
+        deo_badge_row = tk.Frame(win, bg=C_BG)
+        deo_badge_row.pack(fill="x", pady=(6, 0), **pad)
+        self._deo_badge = tk.Label(deo_badge_row, text="D", font=(FONT, 10, "bold"),
+                                    fg=C_DEO_ACC, bg=C_BG, width=2)
+        # Visibility (badge + the Deo settings section below) is synced once,
+        # further down, after both have been built.
+
         # ══════ CONTROL BUTTONS ══════
         ctrl_frame = tk.Frame(win, bg=C_BG)
         ctrl_frame.pack(fill="x", pady=(14, 8), **pad)
@@ -3226,6 +4206,102 @@ class ScreenBreakApp:
                        bg=C_BG, variable=self._desk_var, selectcolor=C_CARD_IN,
                        activebackground=C_BG, activeforeground=C_TEXT_DIM).pack(side="left")
 
+        # ══════ DEO MODE — built unconditionally but only ever shown (via
+        # _deo_update_badge) while armed, so a child browsing Settings while
+        # it's off sees nothing about it. ══════
+        # Fields start disabled every time a fresh window is built — editing
+        # (and disarming) requires the hidden gesture again this session.
+        self._deo_settings_authenticated = False
+        self._deo_settings_widgets = []
+
+        self._deo_settings_frame = tk.Frame(scroll_frame, bg=C_BG)
+        tk.Frame(self._deo_settings_frame, bg=C_TEXT_MUT, height=1).pack(fill="x", pady=(6, 6), **spad)
+        tk.Label(self._deo_settings_frame, text="Deo mode", font=(FONT, 11, "bold"),
+                 fg=C_DEO_ACC, bg=C_BG).pack(pady=(0, 4), **spad, anchor="w")
+        deof = tk.Frame(self._deo_settings_frame, bg=C_BG);  deof.pack(fill="x", **spad)
+
+        dwf = tk.Frame(deof, bg=C_BG);  dwf.pack(fill="x", pady=2)
+        tk.Label(dwf, text="Allowed", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
+        self._deo_start_entry = tk.Entry(dwf, width=6, font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, relief="flat", justify="center")
+        self._deo_start_entry.pack(side="left", padx=4)
+        self._deo_start_entry.insert(0, self.config.get("deo_allowed_start", "09:00"))
+        self._deo_start_entry.configure(state="disabled")
+        self._deo_settings_widgets.append(self._deo_start_entry)
+        tk.Label(dwf, text="to", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
+        self._deo_end_entry = tk.Entry(dwf, width=6, font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, relief="flat", justify="center")
+        self._deo_end_entry.pack(side="left", padx=4)
+        self._deo_end_entry.insert(0, self.config.get("deo_allowed_end", "18:00"))
+        self._deo_end_entry.configure(state="disabled")
+        self._deo_settings_widgets.append(self._deo_end_entry)
+
+        dlf = tk.Frame(deof, bg=C_BG);  dlf.pack(fill="x", pady=2)
+        tk.Label(dlf, text="Daily limit", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
+        self._deo_limit_spin = tk.Spinbox(dlf, from_=5, to=600, width=5, font=(MONO, 10),
+            bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC, relief="flat", justify="center")
+        self._deo_limit_spin.pack(side="left", padx=4);  self._deo_limit_spin.delete(0, "end")
+        self._deo_limit_spin.insert(0, str(self.config.get("deo_daily_limit_minutes", 120)))
+        self._deo_limit_spin.configure(state="disabled")
+        self._deo_settings_widgets.append(self._deo_limit_spin)
+        tk.Label(dlf, text="min", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+
+        drf = tk.Frame(deof, bg=C_BG);  drf.pack(fill="x", pady=2)
+        tk.Label(drf, text="Wind-down warning starts", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
+        self._deo_ramp_spin = tk.Spinbox(drf, from_=1, to=30, width=4, font=(MONO, 10),
+            bg=C_CARD_IN, fg=C_TEXT, buttonbackground=C_BTN_SEC, relief="flat", justify="center")
+        self._deo_ramp_spin.pack(side="left", padx=4);  self._deo_ramp_spin.delete(0, "end")
+        self._deo_ramp_spin.insert(0, str(self.config.get("deo_warn_ramp_minutes", 10)))
+        self._deo_ramp_spin.configure(state="disabled")
+        self._deo_settings_widgets.append(self._deo_ramp_spin)
+        tk.Label(drf, text="min before", font=(FONT, 10), fg=C_TEXT_MUT, bg=C_BG).pack(side="left")
+
+        dmf = tk.Frame(deof, bg=C_BG);  dmf.pack(fill="x", pady=2)
+        self._deo_mute_var = tk.BooleanVar(value=self.config.get("deo_mute_audio_on_lock", True))
+        deo_mute_cb = tk.Checkbutton(dmf, text="Mute system audio when a lockout starts", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._deo_mute_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM, state="disabled")
+        deo_mute_cb.pack(side="left")
+        self._deo_settings_widgets.append(deo_mute_cb)
+
+        dnf = tk.Frame(deof, bg=C_BG);  dnf.pack(fill="x", pady=2)
+        tk.Label(dnf, text="Next activity (optional)", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
+        self._deo_next_entry = tk.Entry(dnf, width=22, font=(FONT, 10), bg=C_CARD_IN, fg=C_TEXT, relief="flat")
+        self._deo_next_entry.pack(side="left", padx=4)
+        self._deo_next_entry.insert(0, self.config.get("deo_next_activity", ""))
+        self._deo_next_entry.configure(state="disabled")
+        self._deo_settings_widgets.append(self._deo_next_entry)
+
+        self._deo_pin_entry = None
+        if DEO_PIN_UI_ENABLED:
+            dpf = tk.Frame(deof, bg=C_BG);  dpf.pack(fill="x", pady=2)
+            tk.Label(dpf, text="Unlock PIN (optional)", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
+            self._deo_pin_entry = tk.Entry(dpf, width=10, show="*", font=(MONO, 10), bg=C_CARD_IN, fg=C_TEXT, relief="flat")
+            self._deo_pin_entry.pack(side="left", padx=4)
+            self._deo_pin_entry.insert(0, self.config.get("deo_unlock_pin", ""))
+            self._deo_pin_entry.configure(state="disabled")
+            self._deo_settings_widgets.append(self._deo_pin_entry)
+
+        dllf = tk.Frame(deof, bg=C_BG);  dllf.pack(fill="x", pady=2)
+        tk.Label(dllf, text="Lockdown level", font=(FONT, 10), fg=C_TEXT_DIM, bg=C_BG).pack(side="left")
+        self._deo_level_var = tk.StringVar(value=self.config.get("deo_lockdown_level", "maximum"))
+        deo_level_menu = tk.OptionMenu(dllf, self._deo_level_var, "maximum", "strong", "overlay")
+        deo_level_menu.configure(state="disabled")
+        deo_level_menu.pack(side="left", padx=4)
+        self._deo_settings_widgets.append(deo_level_menu)
+
+        dhf = tk.Frame(deof, bg=C_BG);  dhf.pack(fill="x", pady=2)
+        self._deo_hklm_var = tk.BooleanVar(value=self.config.get("deo_use_hklm", False))
+        deo_hklm_cb = tk.Checkbutton(dhf, text="Also apply machine-wide (needs admin)", font=(FONT, 10), fg=C_TEXT_DIM,
+                       bg=C_BG, variable=self._deo_hklm_var, selectcolor=C_CARD_IN,
+                       activebackground=C_BG, activeforeground=C_TEXT_DIM, state="disabled")
+        deo_hklm_cb.pack(side="left")
+        self._deo_settings_widgets.append(deo_hklm_cb)
+
+        self._deo_readout_var = tk.StringVar(value="")
+        tk.Label(deof, textvariable=self._deo_readout_var, font=(FONT, 9), fg=C_TEXT_MUT, bg=C_BG,
+                 justify="left", wraplength=340).pack(fill="x", pady=(6, 0))
+
+        self._deo_update_badge()  # syncs visibility of the "D" badge + this whole section
+
         self._update_status()
         win.protocol("WM_DELETE_WINDOW", self._close_status)
 
@@ -3434,6 +4510,37 @@ class ScreenBreakApp:
             self.config["breathing_widget_bg"] = self._breath_bg_var.get()
             self.config["breathing_widget_click_through"] = self._breath_ct_var.get()
 
+            # Deo mode settings: only written if the hidden gesture has
+            # authorized this session — the fields are disabled in the UI
+            # until then anyway, but this is the actual enforcement point.
+            if self._deo_settings_authenticated:
+                deo_start = self._deo_start_entry.get().strip()
+                deo_end = self._deo_end_entry.get().strip()
+                for ts in [deo_start, deo_end]:
+                    h, m = ts.split(":")
+                    if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+                        raise ValueError("Invalid Deo time")
+                self.config["deo_allowed_start"] = deo_start
+                self.config["deo_allowed_end"] = deo_end
+                try:
+                    deo_limit = int(self._deo_limit_spin.get())
+                    if deo_limit >= 1:
+                        self.config["deo_daily_limit_minutes"] = deo_limit
+                except ValueError:
+                    pass
+                try:
+                    deo_ramp = int(self._deo_ramp_spin.get())
+                    if deo_ramp >= 1:
+                        self.config["deo_warn_ramp_minutes"] = deo_ramp
+                except ValueError:
+                    pass
+                self.config["deo_mute_audio_on_lock"] = self._deo_mute_var.get()
+                self.config["deo_next_activity"] = self._deo_next_entry.get().strip()
+                if DEO_PIN_UI_ENABLED and self._deo_pin_entry is not None:
+                    self.config["deo_unlock_pin"] = self._deo_pin_entry.get().strip()
+                self.config["deo_lockdown_level"] = self._deo_level_var.get()
+                self.config["deo_use_hklm"] = self._deo_hklm_var.get()
+
             # Apply breathing widget toggle live (recreate to pick up size/bg/alpha changes)
             if self._breath_enabled_var.get():
                 self._destroy_breathing_widget()
@@ -3459,6 +4566,12 @@ class ScreenBreakApp:
 
     def _reset_defaults(self) -> None:
         dc = json.loads(json.dumps(DEFAULT_CONFIG))
+        # Deo mode must never be touched by the ordinary "Reset to Defaults"
+        # button — that would be a silent, discoverable way to disarm or
+        # reconfigure it. It only ever changes via Alt+Shift+D + its own fields.
+        for key in list(dc.keys()):
+            if key.startswith("deo_"):
+                del dc[key]
         self.config.update(dc);  save_config(self.config)
 
         # Refresh interval widgets
@@ -3545,6 +4658,7 @@ class ScreenBreakApp:
             except tk.TclError:
                 pass
             self._status_win = None
+        self._deo_settings_authenticated = False
 
     def _toggle_status_window(self) -> None:
         """Toggle status window - close if open, open if closed."""
@@ -3760,6 +4874,8 @@ class ScreenBreakApp:
         # Update control buttons
         self._update_pause_btn()
         self._update_gentle_btn()
+        if self.config.get("deo_mode_enabled", False):
+            self._deo_update_readout()
 
         try:
             self._status_win.after(1000, self._update_status)
@@ -4548,7 +5664,9 @@ class ScreenBreakApp:
             pystray.Menu.SEPARATOR,
             pystray.MenuItem(
                 lambda item: "▶  Resume" if self.paused else "⏸  Pause",
-                lambda icon, item: self.root.after(0, self._toggle_pause)),
+                lambda icon, item: self.root.after(0, self._toggle_pause),
+                # Pause would bypass Deo enforcement — hide it while armed.
+                visible=lambda item: not self.config.get("deo_mode_enabled", False)),
             pystray.MenuItem(
                 lambda item: "✓  Gentle mode" if self.low_energy else "🪫  Gentle mode",
                 lambda icon, item: self.root.after(0, self._toggle_low_energy)),
@@ -4556,9 +5674,18 @@ class ScreenBreakApp:
                 lambda icon, item: self.root.after(0, self._show_stats_win)),
             pystray.MenuItem("📝  Notes",
                 lambda icon, item: self.root.after(0, self._show_notes_win)),
+            pystray.MenuItem("🔄  Check for Updates",
+                lambda icon, item: self.root.after(0, self._check_for_updates_ui),
+                # Hidden while armed for the same reason as Quit — updating
+                # briefly exits and relaunches the process.
+                visible=lambda item: not self.config.get("deo_mode_enabled", False)),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Quit",
-                lambda icon, item: self.root.after(0, self._quit)),
+                lambda icon, item: self.root.after(0, self._quit),
+                # The hidden gesture (Alt+Shift+D in settings) is the only way
+                # out of Deo mode — hide Quit while armed rather than let it
+                # bypass enforcement (the watchdog would just relaunch anyway).
+                visible=lambda item: not self.config.get("deo_mode_enabled", False)),
         )
         self.tray = pystray.Icon("screen_break", img, "Screen Break", menu)
         self.tray.run()
@@ -4588,6 +5715,35 @@ class ScreenBreakApp:
         # The computed properties (eye_iv, micro_iv) will automatically adjust
 
     def _quit(self, icon: Optional[Any] = None, item: Optional[Any] = None) -> None:
+        if self.config.get("deo_mode_enabled", False):
+            return  # Deo mode: the hidden gesture is the only way out
+        save_stats(self.stats)
+        self._destroy_breathing_widget()
+        if HAS_TRAY and hasattr(self, "tray"):
+            self.tray.stop()
+        self.root.after(0, self.root.quit)
+
+    def _check_for_updates_ui(self) -> None:
+        """Tray action: fetch, offer a fast-forward-only pull + relaunch if
+        behind. Only reachable while Deo mode is disarmed (menu item is
+        hidden otherwise) — bypasses _quit()'s Deo guard directly rather than
+        routing through it, since this is a restart, not an escape."""
+        from tkinter import messagebox
+        result = check_for_updates()
+        if result.get("reason") == "not_a_git_checkout":
+            messagebox.showinfo("Screen Break",
+                "Updates aren't available for this installation\n(not running from a git checkout).")
+            return
+        if not result.get("available"):
+            reason = result.get("reason")
+            msg = f"Couldn't check for updates ({reason})." if reason else "You're already up to date."
+            messagebox.showinfo("Screen Break", msg)
+            return
+        if not messagebox.askyesno("Screen Break", "An update is available. Update and restart now?"):
+            return
+        if not apply_update_and_restart(result["repo"]):
+            messagebox.showerror("Screen Break", "Update failed (local changes may conflict). Nothing was changed.")
+            return
         save_stats(self.stats)
         self._destroy_breathing_widget()
         if HAS_TRAY and hasattr(self, "tray"):
@@ -4596,7 +5752,189 @@ class ScreenBreakApp:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Deo mode persistence: single-instance guard + watchdog. Windows only —
+# these named mutexes and the whole --watchdog process only make sense there.
+_deo_mutex_handle = None  # kept alive for the process lifetime; a local var would be GC'd
+
+def _deo_mutex_exists(name: str) -> bool:
+    """True if a mutex with this name currently exists (owned by anyone)."""
+    if not IS_WIN:
+        return False
+    try:
+        SYNCHRONIZE = 0x00100000
+        handle = ctypes.windll.kernel32.OpenMutexW(SYNCHRONIZE, False, name)
+        if handle:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return True
+        return False
+    except Exception:
+        return False
+
+def _deo_acquire_instance_mutex() -> bool:
+    """True if this process now owns the main-instance mutex (i.e. no other
+    Deo-armed instance is running); False if one already holds it."""
+    global _deo_mutex_handle
+    if not IS_WIN:
+        return True
+    try:
+        ERROR_ALREADY_EXISTS = 183
+        handle = ctypes.windll.kernel32.CreateMutexW(None, False, DEO_MAIN_MUTEX)
+        if not handle:
+            return True  # couldn't create it; don't block launch over this
+        if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            ctypes.windll.kernel32.CloseHandle(handle)
+            return False
+        _deo_mutex_handle = handle
+        return True
+    except Exception:
+        return True
+
+def _deo_lock_file_says_armed() -> bool:
+    try:
+        with open(DEO_LOCK_FILE, encoding="utf-8") as f:
+            return f.read().strip() == "armed"
+    except (IOError, OSError):
+        return False
+
+def _deo_write_lock_file(armed: bool) -> None:
+    try:
+        if armed:
+            with open(DEO_LOCK_FILE, "w", encoding="utf-8") as f:
+                f.write("armed")
+        elif os.path.exists(DEO_LOCK_FILE):
+            os.remove(DEO_LOCK_FILE)
+    except (IOError, OSError):
+        pass
+
+def _deo_launch_args() -> list:
+    if getattr(sys, "frozen", False):
+        return [sys.executable]
+    return [sys.executable, os.path.abspath(__file__)]
+
+# ─── Self-update (general app feature, not Deo-specific) ───────
+def _find_repo_root() -> Optional[str]:
+    """The git checkout root this script lives in, or None if it's not one
+    (e.g. a frozen EXE, or a plain file copy)."""
+    d = os.path.dirname(os.path.abspath(__file__))
+    if os.path.isdir(os.path.join(d, ".git")):
+        return d
+    return None
+
+def check_for_updates() -> dict:
+    """Fetch from origin and report whether the tracked branch is behind.
+    Read-only — never modifies the working tree."""
+    repo = _find_repo_root()
+    if not repo:
+        return {"available": False, "reason": "not_a_git_checkout"}
+    import subprocess
+    try:
+        subprocess.run(["git", "fetch", "--quiet"], cwd=repo, timeout=20, check=True,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        local = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
+                                capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        remote = subprocess.run(["git", "rev-parse", "@{u}"], cwd=repo,
+                                 capture_output=True, text=True, timeout=10, check=True).stdout.strip()
+        return {"available": local != remote, "repo": repo}
+    except subprocess.TimeoutExpired:
+        return {"available": False, "reason": "timed out reaching the remote"}
+    except subprocess.CalledProcessError:
+        return {"available": False, "reason": "git error (no upstream configured?)"}
+    except FileNotFoundError:
+        return {"available": False, "reason": "git is not installed"}
+
+def apply_update_and_restart(repo: str) -> bool:
+    """Fast-forward-only pull (never clobbers local edits) then relaunches.
+    Returns False, leaving the running app untouched, if the pull fails."""
+    import subprocess
+    try:
+        subprocess.run(["git", "pull", "--ff-only"], cwd=repo, timeout=30, check=True,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    try:
+        subprocess.Popen(_deo_launch_args())
+    except Exception:
+        return False
+    return True
+
+def _deo_watchdog_main() -> None:
+    """Lightweight guardian process, no GUI: relaunches the main app if it's
+    killed while Deo mode is still armed (per the shared lock file); exits
+    on its own once disarmed. Polls every 3s — no need for anything faster."""
+    if not IS_WIN:
+        return
+    try:
+        ERROR_ALREADY_EXISTS = 183
+        handle = ctypes.windll.kernel32.CreateMutexW(None, False, DEO_WATCHDOG_MUTEX)
+        if not handle or ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            return  # another watchdog is already running
+    except Exception:
+        return
+
+    import subprocess
+    args = _deo_launch_args()
+    DETACHED_PROCESS = 0x00000008
+    CREATE_NO_WINDOW = 0x08000000
+    while _deo_lock_file_says_armed():
+        if not _deo_mutex_exists(DEO_MAIN_MUTEX):
+            try:
+                subprocess.Popen(args, creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW, close_fds=True)
+            except Exception:
+                pass
+        time.sleep(3)
+
+
+def _deo_selftest_main() -> None:
+    """Headless dry-run of the Deo decision engine: no Tk, no overlays, no
+    platform-specific code — just deo_decide over a compressed fake clock.
+    Safe to run on any OS/CI to sanity-check ALLOWED/WARN/LOCK transitions
+    and the parent-unlock override end to end."""
+    cfg = dict(DEFAULT_CONFIG)
+    cfg["deo_allowed_start"] = "09:00"
+    cfg["deo_allowed_end"] = "18:00"
+    cfg["deo_daily_limit_minutes"] = 3  # tiny, so the whole day prints in a few lines
+    cfg["deo_warn_ramp_minutes"] = 1
+    usage = {"used_seconds": 0, "unlocks": 0, "bonus_seconds": 0, "override_until": None}
+
+    day = datetime.date.today()
+    t = datetime.datetime.combine(day, datetime.time(8, 55))
+    end_of_day = datetime.datetime.combine(day, datetime.time(18, 5))
+    step = datetime.timedelta(seconds=15)
+    last_state = None
+    unlocked_once = False
+
+    print("[deo-selftest] window 09:00-18:00, 3 min daily budget, 1 min ramp\n")
+    while t <= end_of_day:
+        decision = deo_decide(t, cfg, usage)
+        if decision.state != last_state:
+            reason = f" ({decision.reason})" if decision.reason else ""
+            print(f"  {t.time()}  ->  {decision.state.upper()}{reason}"
+                  f"  remaining={int(decision.remaining_seconds)}s"
+                  f"  intensity={decision.ramp_intensity:.2f}")
+            last_state = decision.state
+        if decision.state != DeoState.LOCK:
+            usage["used_seconds"] += step.total_seconds()
+        elif decision.reason == DeoReason.BUDGET_EXHAUSTED and not unlocked_once:
+            until = t + datetime.timedelta(minutes=2)
+            usage["override_until"] = until.isoformat()
+            usage["unlocks"] += 1
+            unlocked_once = True
+            print(f"  {t.time()}  ->  [simulated parent unlock, override until {until.time()}]")
+        t += step
+
+    print(f"\n[deo-selftest] done. unlocks={usage['unlocks']} used_seconds={int(usage['used_seconds'])}")
+
+
 def main():
+    if getattr(_args, "watchdog", False):
+        _deo_watchdog_main()
+        return
+    if getattr(_args, "deo_selftest", False):
+        _deo_selftest_main()
+        return
+    if IS_WIN and load_config().get("deo_mode_enabled", False):
+        if not _deo_acquire_instance_mutex():
+            return  # another Deo-armed instance is already running
     ScreenBreakApp()
 
 
