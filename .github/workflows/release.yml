@@ -48,6 +48,10 @@ jobs:
         if: runner.os == 'macOS'
         run: pip install pyobjc-framework-Quartz pyobjc-framework-Cocoa
 
+      - name: Install Windows Python dependencies
+        if: runner.os == 'Windows'
+        run: pip install pycaw comtypes
+
       - name: Build with PyInstaller
         run: pyinstaller screen_break.spec
 

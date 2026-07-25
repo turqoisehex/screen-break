@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "screen-break"
-version = "2.3.7"
+version = "2.4.0"
 description = "Healthy break reminder app with 20-20-20 eye rest, micro-pauses, guided exercises, themes, and multi-monitor support"
 readme = "README.md"
 license = "MIT"

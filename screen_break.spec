@@ -198,7 +198,12 @@ hiddenimports = collect_submodules('pystray')
 
 # Platform-specific pystray backends and dependencies
 if sys.platform == 'win32':
-    platform_imports = ['pystray._win32']
+    # pycaw/comtypes power Deo mode's system-audio mute on lockout. comtypes
+    # generates COM wrapper modules dynamically, which PyInstaller's static
+    # import analysis can miss -- list them explicitly so the EXE is
+    # self-contained (no separate "pip install pycaw" step for end users).
+    platform_imports = ['pystray._win32', 'pycaw', 'pycaw.pycaw', 'comtypes',
+                         'comtypes.client', 'comtypes.gen']
 elif sys.platform == 'darwin':
     platform_imports = ['pystray._darwin', 'objc', 'AppKit', 'Foundation',
                         'Quartz', 'Quartz.CoreGraphics',
