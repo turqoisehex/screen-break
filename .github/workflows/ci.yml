@@ -26,7 +26,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install ruff
+          pip install ruff pytest
           pip install pystray Pillow screeninfo
 
       - name: Install Linux dependencies
@@ -37,3 +37,9 @@ jobs:
 
       - name: Verify import
         run: xvfb-run python -c "import screen_break; print('Import OK')"
+
+      - name: Run tests
+        run: xvfb-run python -m pytest tests/ -v
+
+      - name: Deo mode selftest (headless decision-engine dry run)
+        run: xvfb-run python screen_break.py --deo-selftest
