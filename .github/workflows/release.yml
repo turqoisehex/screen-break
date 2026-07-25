@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to release (e.g. v2.4.0) -- created if it does not already exist'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -99,6 +105,8 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          target_commitish: ${{ github.event_name == 'workflow_dispatch' && github.sha || '' }}
           files: |
             release/ScreenBreak-Windows.exe
             release/ScreenBreak-macOS.dmg
