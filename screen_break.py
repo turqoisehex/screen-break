@@ -1113,6 +1113,23 @@ if TEST_MODE:
     print("      Eye rest: 1 min, Micro-pause: 2 min\n")
 
 
+# ─── Breathing Widget Rendering ──────────────────────────────
+def draw_breath_rings_bgra(img, draw, w: int, h: int, core_r: float,
+                           teal: list, step: float) -> None:
+    """Clear `img` and draw the breathing rings into it in BGRA byte order.
+
+    Produces exactly the bytes of drawing the rings in RGBA and swapping R<->B
+    afterwards (fills are all opaque and the background fully transparent, so
+    rasterization is colour-independent), but into a reused image — no
+    per-frame image, channel-split or tobytes() allocations."""
+    n = len(teal)
+    img.paste((0, 0, 0, 0), (0, 0, w, h))
+    cx, cy = w // 2, h // 2
+    for i, (r8, g8, b8) in enumerate(teal):
+        r = core_r * (1.0 + (n - 1 - i) * step)
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(b8, g8, r8, 255))
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class ScreenBreakApp:
 
@@ -1233,6 +1250,9 @@ class ScreenBreakApp:
         self._breath_hbmp = None
         self._breath_ppv = None
         self._breath_old_bmp = None
+        # PIL view onto the DIB's pixel memory (frames are drawn in place)
+        self._breath_dib_img = None
+        self._breath_dib_draw = None
 
         self.last_mini_reminder = datetime.datetime.now()
         self._mini_win = None
@@ -5402,12 +5422,37 @@ class ScreenBreakApp:
             self._breath_hbmp = hbmp
             self._breath_ppv = ppv
             self._breath_old_bmp = gdi32.SelectObject(hdc_mem, hbmp)
+            self._breath_map_dib(w, h)
             return True
         except Exception:
             return False
 
+    def _breath_map_dib(self, w: int, h: int) -> None:
+        """Wrap the DIB section's pixels (top-down 32bpp, same layout as raw
+        RGBA) in a PIL image so frames are drawn straight into it. Leaves the
+        view unset — and the copy-based path in use — unless a test write
+        provably lands in the DIB."""
+        self._breath_dib_img = None
+        self._breath_dib_draw = None
+        try:
+            buf = (ctypes.c_ubyte * (w * h * 4)).from_address(self._breath_ppv.value)
+            img = Image.frombuffer("RGBA", (w, h), buf, "raw", "RGBA", 0, 1)
+            img.readonly = 0  # write through to the shared buffer, no copy-on-write
+            draw = ImageDraw.Draw(img)
+            img.putpixel((0, 0), (1, 2, 3, 4))
+            writes_through = buf[0:4] == [1, 2, 3, 4]
+            img.putpixel((0, 0), (0, 0, 0, 0))
+            if writes_through:
+                self._breath_dib_img = img
+                self._breath_dib_draw = draw
+        except Exception:
+            pass
+
     def _breath_free_gdi(self) -> None:
         """Release cached GDI resources."""
+        # Drop the PIL view first: it points into the DIB memory freed below.
+        self._breath_dib_img = None
+        self._breath_dib_draw = None
         try:
             gdi32 = ctypes.windll.gdi32
             user32 = ctypes.windll.user32
@@ -5436,7 +5481,13 @@ class ScreenBreakApp:
                 return
         try:
             ctypes.memmove(self._breath_ppv, bgra_bytes, len(bgra_bytes))
+        except Exception:
+            return
+        self._breath_present_layered(w, h)
 
+    def _breath_present_layered(self, w: int, h: int) -> None:
+        """Push the DIB's current pixels to the window via UpdateLayeredWindow."""
+        try:
             alpha_byte = max(1, min(255, int(
                 self.config.get("breathing_widget_alpha", 0.10) * 255)))
             blend = (ctypes.c_ubyte * 4)(0, 0, alpha_byte, 1)
@@ -5494,7 +5545,21 @@ class ScreenBreakApp:
             min_r = max_r * 0.33
             core_r = min_r + (max_r - min_r) * breath
 
-            # Draw rings directly on transparent RGBA
+            if self._breath_hwnd and not self._breath_ppv and not self._breath_init_gdi(win_w, win_h):
+                # No bitmap to draw into this frame; setup is retried next frame.
+                self._breath_schedule_next_frame(win_w, win_h)
+                return
+            if self._breath_dib_img is not None:
+                # Fast path: draw in place into the DIB — same bytes, no allocations.
+                # The view only exists if _breath_map_dib's write-through test passed.
+                draw_breath_rings_bgra(self._breath_dib_img, self._breath_dib_draw,
+                                       win_w, win_h, core_r, self._BREATH_TEAL, step)
+                self._breath_present_layered(win_w, win_h)
+                self._breath_schedule_next_frame(win_w, win_h)
+                return
+
+            # Fallback (no in-place view): draw into a fresh RGBA image, swap
+            # R<->B, and copy the result into the DIB
             rgba = Image.new("RGBA", (win_w, win_h), (0, 0, 0, 0))
             draw = ImageDraw.Draw(rgba)
             cx, cy = win_w // 2, win_h // 2
@@ -5525,6 +5590,10 @@ class ScreenBreakApp:
             except tk.TclError:
                 return
 
+        self._breath_schedule_next_frame(win_w, win_h)
+
+    def _breath_schedule_next_frame(self, win_w: int, win_h: int) -> None:
+        """Schedule the next breathing-widget animation frame."""
         # Schedule next frame (~60fps on Windows, ~30fps on macOS for large sizes)
         _frame_ms = 16
         if IS_MAC and max(win_w, win_h) > 500:
