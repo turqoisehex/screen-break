@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- Breathing widget (Windows, transparent background) now draws each frame in
+  place instead of allocating and copying full-size images, greatly reducing
+  its CPU use and memory churn. Appearance and timing are unchanged.
+
 ## [2.1.0] - 2026-03-14
 
 ### Added
